@@ -12,3 +12,5 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 73efe01495f02794898ebfcc97156d23, type: 3}
   m_Name: PTRP
   m_EditorClassIdentifier: 
+  _MaxDepth: 3
+  _TargetSampleCount: 64

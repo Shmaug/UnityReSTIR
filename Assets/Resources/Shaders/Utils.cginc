@@ -83,4 +83,16 @@ float3 UnpackNormal(const uint p) {
 	return UnpackNormal2(D3DX_R16G16_SNORM_to_FLOAT2(p));
 }
 
+float3x3 MakeOrthonormal(float3 N) {
+    float3x3 r;
+	if (N[0] != N[1] || N[0] != N[2])
+		r[0] = float3(N[2] - N[1], N[0] - N[2], N[1] - N[0]);  // (1,1,1) x N
+	else
+		r[0] = float3(N[2] - N[1], N[0] + N[2], -N[1] - N[0]);  // (-1,1,1) x N
+	r[0] = normalize(r[0]);
+	r[1] = cross(N, r[0]);
+    r[2] = N;
+    return r;
+}
+
 #endif

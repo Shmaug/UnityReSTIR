@@ -5,13 +5,17 @@
 #include "Random.cginc"
 
 RWTexture2D<float4> _OutputImage;
+RWTexture2D<float4> _OutputAlbedo;
+RWTexture2D<int4>  _OutputVisibility;
+RWTexture2D<float2> _OutputPrevUVs;
 uint2 _OutputExtent;
 
 uint _Seed;
 
-float4x4 _CameraToWorldMatrix;
-float4x4 _WorldToCameraMatrix;
-float4x4 _CameraInverseProjectionMatrix;
+float4x4 _CameraToWorld;
+float4x4 _WorldToCamera;
+float4x4 _CameraInverseProjection;
+float4x4 _PrevWorldToClip;
 
 
 struct PathState {
@@ -37,42 +41,51 @@ float4 Randf(uint2 id, inout PathState state) {
     return r;
 }
 
+void Shade(uint2 id, inout PathState state, ShadingData sd, RayDesc ray) {
+    _OutputImage[id] += float4(state._Throughput * sd.Emission(), 0);
 
-void Shade(uint2 id, inout PathState state) {
-    RayDesc ray = MakeRay(state._Origin, state._Direction);
+    LightSampleRecord lr = SampleLight(sd, -ray.Direction, Rand(id, state));
+    float3 radiance = lr._Radiance * lr._Brdf * lr._G / lr._PdfA;
+    _OutputImage[id] += float4(state._Throughput * radiance, 0);
 
-    ShadingData sd = TraceRay(ray);
-    if (!all(isfinite(sd._Position))) {
-        state._Throughput = 0;
-        return;
-    }
-    
-    float4 rnd = Randf(id, state);
-
-    float3 le = SampleRadiance(sd, GetLight(rnd.w * _LightCount), -ray.Direction);
-    _OutputImage[id] += float4(state._Throughput * le, 0);
-
-    state._Direction = SampleCosHemisphere(rnd.x, rnd.y);
+    state._Direction = SampleCosHemisphere(Randf(id, state).xy);
     state._DirPdfW   = CosHemispherePdfW(state._Direction.z);
     state._Direction = sd.ToWorld(state._Direction);
     state._Throughput *= sd.Brdf(-ray.Direction, state._Direction) / state._DirPdfW;
     state._Origin = OffsetRayOrigin(sd._Position, sd.GeometryNormal(), state._Direction);
 }
 
+float2 ComputePrevUV(ShadingData sd) {
+    float4 prevClipPos = mul(_PrevWorldToClip, float4(sd._Position, 1));
+    return (-prevClipPos.xy/prevClipPos.w)*.5 + .5;
+}
+
 [shader("raygeneration")]
 void RenderFirstBounce() {
     uint2 id = DispatchRaysIndex().xy;
-    if (any(id.xy >= _OutputExtent)) return;
+    if (any(id >= _OutputExtent)) return;
     
     _OutputImage[id] = float4(0, 0, 0, 1);
     
     PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     state._Throughput = 1;
-    state._Origin    = mul(_CameraToWorldMatrix, float4(0, 0, 0, 1)).xyz;
-    state._Direction = mul(_CameraInverseProjectionMatrix, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
-    state._Direction = normalize(mul(_CameraToWorldMatrix, float4(state._Direction, 0)).xyz);
+    state._Origin    = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
+    state._Direction = mul(_CameraInverseProjection, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
+    state._Direction = normalize(mul(_CameraToWorld, float4(state._Direction, 0)).xyz);
 
-    Shade(id, state);
+    RayDesc ray = MakeRay(state._Origin, state._Direction);
+    ShadingData sd = TraceRay(ray);
+    if (all(isfinite(sd._Position))) {
+        _OutputAlbedo[id] = float4(sd.BaseColor(), 1);
+        _OutputVisibility[id] = int4(asint(length(sd._Position - ray.Origin)), sd._PackedShadingNormal, 0, 0);
+        _OutputPrevUVs[id] = ComputePrevUV(sd);
+        Shade(id, state, sd, ray);
+    } else {
+        _OutputAlbedo[id] = 1;
+        _OutputVisibility[id] = int4(asint(POS_INFINITY), 0, 0, 0);
+        _OutputPrevUVs[id] = (id + 0.5) / _OutputExtent;
+        state._Throughput = 0;
+    }
 
     _State[id.y*_OutputExtent.x + id.x] = state;
 }
@@ -80,14 +93,20 @@ void RenderFirstBounce() {
 [shader("raygeneration")]
 void RenderNextBounce() {
     uint2 id = DispatchRaysIndex().xy;
-    if (any(id.xy >= _OutputExtent)) return;
+    if (any(id >= _OutputExtent)) return;
 
     PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     state = _State[id.y*_OutputExtent.x + id.x];
     if (!any(state._Throughput > 0))
         return;
     
-    Shade(id, state);
+    RayDesc ray = MakeRay(state._Origin, state._Direction);
+    ShadingData sd = TraceRay(ray);
+    if (all(isfinite(sd._Position))) {
+        Shade(id, state, sd, ray);
+    } else {
+        state._Throughput = 0;
+    }
     
     _State[id.y*_OutputExtent.x + id.x] = state;
 }

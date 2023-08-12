@@ -35,6 +35,8 @@ uint4 pcg4d(uint4 v) {
 	return v;
 }
 
+#define UINT_TO_FLOAT_01(u) (asfloat(0x3f800000 | ((u) >> 9)) - 1)
+
 struct RandomSampler {
 	uint4 mState;
         
@@ -47,7 +49,7 @@ struct RandomSampler {
         return pcg4d(mState);
     }
     float4 NextFloat() {
-        return (asfloat(0x3f800000 | ((Next()) >> 9)) - 1);
+        return UINT_TO_FLOAT_01(Next());
     }
 };
 

@@ -25,12 +25,13 @@ float3 OffsetRayOrigin(float3 pos, float3 n, float3 dir) {
                   abs(pos.z) < origin ? pos.z + float_scale * n.z : asfloat(asint(pos.z) + ((pos.z < 0.0) ? -of_i.z : of_i.z)));
 }
 
-ShadingData TraceRay(RayDesc ray) {
+ShadingData TraceRay(RayDesc ray, uint flags = RAY_FLAG_NONE) {
     ShadingData sd;
-    TraceRay(_AccelerationStructure, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, sd);
+    TraceRay(_AccelerationStructure, flags, 0xFF, 0, 1, 0, ray, sd);
     return sd;
 }
 
 bool Occluded(RayDesc ray) {
-    return any(isfinite(TraceRay(ray)._Position));
+    ShadingData sd = TraceRay(ray, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH);
+    return all(isfinite(sd._Position));
 }

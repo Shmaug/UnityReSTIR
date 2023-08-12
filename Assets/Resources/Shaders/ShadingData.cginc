@@ -81,7 +81,12 @@ struct ShadingData {
 		return float3(dot(v, t), dot(v, cross(n, t)), dot(v, n));
     }
 
+
 	float3 Brdf(float3 dirIn, float3 dirOut) {
-		return (BaseColor() / M_PI) * abs(dot(dirOut, ShadingNormal()));
+		float3 n = ShadingNormal();
+		float cosOut = dot(dirOut, n);
+		if (cosOut * dot(dirIn, n) < 0)
+			return 0;
+		return (BaseColor() / M_PI) * abs(cosOut);
 	}
 };

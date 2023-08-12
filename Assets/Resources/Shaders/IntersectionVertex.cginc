@@ -35,7 +35,7 @@ void GetCurrentIntersectionVertex(AttributeData attributeData, out IntersectionV
 	FetchIntersectionVertex(triangleIndices.y, verts[1]);
 	FetchIntersectionVertex(triangleIndices.z, verts[2]);
 
-	for (int i = 0; i < 3; i++) verts[i].position = mul(objectToWorld, verts[i].position);
+	for (int i = 0; i < 3; i++) verts[i].position = mul(objectToWorld, float4(verts[i].position, 1));
 	for (int i = 0; i < 3; i++) verts[i].normal   = mul(objectToWorld, float4(verts[i].normal, 0));
 	for (int i = 0; i < 3; i++) verts[i].tangent  = mul(objectToWorld, float4(verts[i].tangent, 0));
 

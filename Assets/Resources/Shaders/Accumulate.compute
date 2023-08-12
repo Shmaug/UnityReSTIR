@@ -1,22 +1,67 @@
 #pragma kernel Accumulate
 
 RWTexture2D<float4> _OutputImage;
+RWTexture2D<float4> _AlbedoImage;
+RWTexture2D<int4> _VisibilityImage;
+RWTexture2D<float2> _PrevUVs;
 RWTexture2D<float4> _AccumulationImage;
+RWTexture2D<int4> _PrevVisibilityImage;
 uint2 _OutputExtent;
 
 uint _Clear;
+uint _MaxSamples;
 
 [numthreads(8, 8, 1)]
 void Accumulate(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= _OutputExtent)) return;
     
     float4 color = _OutputImage[id.xy];
+
+    float3 albedo = _AlbedoImage[id.xy].rgb + 1e-2;
+    color.rgb /= albedo;
+
     if (_Clear == 0) {
-        float4 prevColor = _AccumulationImage[id.xy];
-        color.rgb = lerp(prevColor.rgb, color.rgb, color.w / (prevColor.w + color.w));
-        color.w += prevColor.w;
+        int4 vis = _VisibilityImage[id.xy];
+
+        float2 prevPixel = _PrevUVs[id.xy] * _OutputExtent - 0.5;
+        
+        float2 wf = frac(prevPixel);
+        float4 prevColor = float4(0,0,0,0);
+        float wsum = 0;
+        for (int x = 0; x < 2; x++) {
+            for (int y = 0; y < 2; y++) {
+                int2 p = int2(prevPixel) + int2(x,y);
+                if (any(p < 0) || any(p >= _OutputExtent))
+                    continue;
+
+                float4 c = _AccumulationImage[p];
+                int4 v = _PrevVisibilityImage[p];
+
+                float wx = (x == 0) ? (1 - wf.x) : wf.x;
+                float wy = (y == 0) ? (1 - wf.y) : wf.y;
+                float w = wx*wy;
+
+                if (abs(asfloat(v.x) - asfloat(vis.x)) > 0.01)
+                    w = 0;
+
+                prevColor += c * w;
+                wsum += w;
+            }
+        }
+        if (wsum > 0)
+            prevColor /= wsum;
+        
+        if (any(isnan(prevColor)))
+            prevColor = 0;
+        
+        float sum = prevColor.w + color.w;
+        if (_MaxSamples > 0)
+            sum = min(sum, _MaxSamples);
+        color.rgb = lerp(prevColor.rgb, color.rgb, color.w / sum);
+        color.w = sum;
     }
     
     _AccumulationImage[id.xy] = color;
-    _OutputImage[id.xy] = float4(color.rgb, 1);
+
+    _OutputImage[id.xy] = float4(color.rgb * albedo, 1);
 }

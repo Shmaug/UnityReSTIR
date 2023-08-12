@@ -16,18 +16,28 @@ public class LightManager {
         public float4x4 _LightToWorld;
         public float3 _Color;
         public uint _Type;
-        public float _Range;
-        public float _InnerSpotAngle; // also _ShadowAngle for directional lights
-        public float _OuterSpotAngle;
-        public float pad;
+        public float _Angle;
+        public float _Radius;
+        public float pad0;
+        public float pad1;
     };
 
     public void BuildLightBuffer(CommandBuffer cmd, RayTracingShader shader) {
         List<GpuLight> lights = new List<GpuLight>();
         foreach (Light light in Object.FindObjectsByType<Light>(FindObjectsSortMode.None)) {
+            if (!light.isActiveAndEnabled) continue;
             GpuLight l = new GpuLight();
             l._LightToWorld = light.transform.localToWorldMatrix;
+            l._Type = (uint)light.type;
             l._Color = (Vector3)(Vector4)light.color * light.intensity;
+            l._Radius = light.shadowRadius;
+            l._Angle = Mathf.Cos(Mathf.Deg2Rad*light.spotAngle/2);
+            if (light.type == LightType.Directional) {
+                if (light.shadows == LightShadows.Soft && light.shadowAngle > 0)
+                    l._Angle = Mathf.Max(1e-4f, Mathf.Cos(Mathf.Deg2Rad*light.shadowAngle));
+                else
+                    l._Angle = 0;
+            }
             lights.Add(l);
         }
         if (lights.Count == 0) return;

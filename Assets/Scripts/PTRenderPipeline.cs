@@ -7,7 +7,9 @@ using Unity.Mathematics;
 
 struct AccumulationData {
     public RenderTexture _AccumulationTexture;
-    public float4x4 _CameraToWorld;
+    public RenderTexture _VisibilityTexture;
+    public Matrix4x4 _CameraToWorld;
+    public Matrix4x4 _Projection;
 };
 
 public class PTRenderPipeline : RenderPipeline {
@@ -40,8 +42,11 @@ public class PTRenderPipeline : RenderPipeline {
         _PathStateBuffer?.Dispose();
         Object.DestroyImmediate(_DefaultMaterial);
         _StandardMaterialMap.Clear();
-        foreach (AccumulationData tex in _AccumulationTextures.Values)
+        foreach (AccumulationData tex in _AccumulationTextures.Values) {
             tex._AccumulationTexture.Release();
+            tex._VisibilityTexture.Release();
+        }
+        _AccumulationTextures.Clear();
     }
 
     bool BuildAccelerationStructure(CommandBuffer cmd) {
@@ -106,6 +111,110 @@ public class PTRenderPipeline : RenderPipeline {
         return true;
     }
 
+    public void RenderCamera(CommandBuffer cmd, Camera camera, RenderTargetIdentifier renderTarget, int w, int h) {
+        bool hasHistory = true;
+        if (!_AccumulationTextures.TryGetValue(camera, out AccumulationData accum) ||
+            !accum._AccumulationTexture ||
+            accum._AccumulationTexture.width < w ||
+            accum._AccumulationTexture.height < h) {
+            if (accum._AccumulationTexture) {
+                Object.DestroyImmediate(accum._AccumulationTexture);
+                _AccumulationTextures.Remove(camera);
+            }
+            {
+                RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBHalf, 0, 1, RenderTextureReadWrite.Linear);
+                desc.enableRandomWrite = true;
+                accum._AccumulationTexture = new RenderTexture(desc);
+            }
+            {
+                RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBInt, 0, 1, RenderTextureReadWrite.Linear);
+                desc.enableRandomWrite = true;
+                accum._VisibilityTexture = new RenderTexture(desc);
+            }
+            _AccumulationTextures.Add(camera, accum);
+            accum._AccumulationTexture.Create();
+            accum._CameraToWorld = camera.transform.localToWorldMatrix;
+            accum._Projection    = camera.projectionMatrix;
+            hasHistory = false;
+        }
+        
+        int albedo = Shader.PropertyToID("_Albedo");
+        int vis = Shader.PropertyToID("_Visibility");
+        int prevUV = Shader.PropertyToID("_PrevUV");
+        {
+            RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBHalf, 0, 1, RenderTextureReadWrite.Linear);
+            desc.enableRandomWrite = true;
+            cmd.GetTemporaryRT(albedo, desc);
+        }
+        {
+            RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBInt, 0, 1, RenderTextureReadWrite.Linear);
+            desc.enableRandomWrite = true;
+            cmd.GetTemporaryRT(vis, desc);
+        }
+        {
+            RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.RGFloat, 0, 1, RenderTextureReadWrite.Linear);
+            desc.enableRandomWrite = true;
+            cmd.GetTemporaryRT(prevUV, desc);
+        }
+
+        // Render
+        {
+            if (_PathStateBuffer == null || _PathStateBuffer.count < w*h)
+                _PathStateBuffer = new ComputeBuffer(w*h, 3*Marshal.SizeOf(typeof(float4)));
+
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_State", _PathStateBuffer);
+            
+            cmd.SetRayTracingTextureParam(_PathTracerShader, "_OutputImage", renderTarget);
+            cmd.SetRayTracingTextureParam(_PathTracerShader, "_OutputAlbedo", albedo);
+            cmd.SetRayTracingTextureParam(_PathTracerShader, "_OutputVisibility", vis);
+            cmd.SetRayTracingTextureParam(_PathTracerShader, "_OutputPrevUVs", prevUV);
+            cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", new int[]{ w, h });
+
+            cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraToWorld",           camera.cameraToWorldMatrix);
+            cmd.SetRayTracingMatrixParam(_PathTracerShader, "_WorldToCamera",           camera.worldToCameraMatrix);
+            cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraInverseProjection", camera.projectionMatrix.inverse);
+
+            cmd.SetRayTracingMatrixParam(_PathTracerShader, "_PrevWorldToClip", accum._Projection * accum._CameraToWorld.inverse);
+
+            cmd.DispatchRays(_PathTracerShader, "RenderFirstBounce", (uint)w, (uint)h, 1);
+            for (int i = 1; i < _Asset._MaxDepth; i++)
+                cmd.DispatchRays(_PathTracerShader, "RenderNextBounce" , (uint)w, (uint)h, 1);
+        }
+
+        // Accumulate/denoise
+        {
+
+            int accumKernel = _AccumulateShader.FindKernel("Accumulate");
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_OutputImage", renderTarget);
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_AlbedoImage", albedo);
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_VisibilityImage", vis);
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevUVs", prevUV);
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_AccumulationImage", accum._AccumulationTexture);
+            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevVisibilityImage", accum._VisibilityTexture);
+            cmd.SetComputeIntParams(_AccumulateShader, "_OutputExtent", new int[]{ w, h });
+
+            bool clear = false;
+            if (_Asset._TargetSampleCount == 0) {
+                bool4x4 b = (float4x4)camera.transform.localToWorldMatrix != (float4x4)accum._CameraToWorld;
+                clear = math.any(b[0]) || math.any(b[1]) || math.any(b[2]) || math.any(b[3]);
+            }
+            cmd.SetComputeIntParams(_AccumulateShader, "_Clear", (clear || !hasHistory) ? 1 : 0);
+            cmd.SetComputeIntParams(_AccumulateShader, "_MaxSamples", (int)_Asset._TargetSampleCount);
+            
+            _AccumulateShader.GetKernelThreadGroupSizes(accumKernel, out uint kw, out uint kh, out _);
+            cmd.DispatchCompute(_AccumulateShader, accumKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
+            
+            accum._CameraToWorld = camera.transform.localToWorldMatrix;
+        }
+
+        cmd.CopyTexture(vis, accum._VisibilityTexture);
+
+        cmd.ReleaseTemporaryRT(albedo);
+        cmd.ReleaseTemporaryRT(vis);
+        cmd.ReleaseTemporaryRT(prevUV);
+
+        _AccumulationTextures[camera] = accum;
+    }
 
     protected override void Render(ScriptableRenderContext context, Camera[] cameras) {
         CommandBuffer cmd = new CommandBuffer();
@@ -124,64 +233,33 @@ public class PTRenderPipeline : RenderPipeline {
             foreach (Camera camera in cameras) {
                 int w = camera.pixelWidth;
                 int h = camera.pixelHeight;
-                RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBFloat, 0, 1, RenderTextureReadWrite.Linear);
-                desc.enableRandomWrite = true;
-                cmd.GetTemporaryRT(outputRT, desc);
-
-                // Render
                 {
-                    if (_PathStateBuffer == null || _PathStateBuffer.count < w*h)
-                        _PathStateBuffer = new ComputeBuffer(w*h, 3*Marshal.SizeOf(typeof(float4)));
-
-                    cmd.SetRayTracingBufferParam(_PathTracerShader, "_State", _PathStateBuffer);
-                    
-                    cmd.SetRayTracingTextureParam(_PathTracerShader, "_OutputImage", outputRT);
-                    cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", new int[]{ w, h });
-
-                    cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraToWorldMatrix",           camera.cameraToWorldMatrix);
-                    cmd.SetRayTracingMatrixParam(_PathTracerShader, "_WorldToCameraMatrix",           camera.worldToCameraMatrix);
-                    cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraInverseProjectionMatrix", camera.projectionMatrix.inverse);
-
-                    cmd.DispatchRays(_PathTracerShader, "RenderFirstBounce", (uint)w, (uint)h, 1);
-                    for (int i = 1; i < _Asset._MaxDepth; i++)
-                        cmd.DispatchRays(_PathTracerShader, "RenderNextBounce" , (uint)w, (uint)h, 1);
+                    RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBHalf, 0, 1, RenderTextureReadWrite.Linear);
+                    desc.enableRandomWrite = true;
+                    cmd.GetTemporaryRT(outputRT, desc);
                 }
 
-                // Accumulate/denoise
-                {
-                    if (!_AccumulationTextures.TryGetValue(camera, out AccumulationData accum) || accum._AccumulationTexture.width < w || accum._AccumulationTexture.height < h) {
-                        if (accum._AccumulationTexture) {
-                            Object.DestroyImmediate(accum._AccumulationTexture);
-                            _AccumulationTextures.Remove(camera);
-                        }
-                        accum._AccumulationTexture = new RenderTexture(desc);
-                        _AccumulationTextures.Add(camera, accum);
-                        accum._AccumulationTexture.Create();
-                        accum._CameraToWorld = Matrix4x4.identity;
-                    }
-
-                    int accumKernel = _AccumulateShader.FindKernel("Accumulate");
-                    cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_AccumulationImage", accum._AccumulationTexture);
-                    cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_OutputImage", outputRT);
-                    cmd.SetComputeIntParams(_AccumulateShader, "_OutputExtent", new int[]{ w, h });
-
-                    bool4x4 b = (float4x4)camera.transform.localToWorldMatrix != accum._CameraToWorld;
-                    cmd.SetComputeIntParams(_AccumulateShader, "_Clear", math.any(b[0]) || math.any(b[1]) || math.any(b[2]) || math.any(b[3]) ? 1 : 0);
-                    
-                    _AccumulateShader.GetKernelThreadGroupSizes(accumKernel, out uint kw, out uint kh, out _);
-                    cmd.DispatchCompute(_AccumulateShader, accumKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
-                    
-                    accum._CameraToWorld = camera.transform.localToWorldMatrix;
-                    _AccumulationTextures[camera] = accum;
-                }
+                RenderCamera(cmd, camera, outputRT, w, h);
 
                 cmd.Blit(outputRT, BuiltinRenderTextureType.CameraTarget);
-
                 cmd.ReleaseTemporaryRT(outputRT);
+
             }
         }
 
         context.ExecuteCommandBuffer(cmd);
+
+        #if UNITY_EDITOR
+        foreach (Camera camera in cameras) {
+            if (camera.cameraType == CameraType.SceneView && UnityEditor.Handles.ShouldRenderGizmos()) {
+                context.DrawUIOverlay(camera);
+                context.DrawWireOverlay(camera);
+                context.DrawGizmos(camera, GizmoSubset.PreImageEffects);
+                context.DrawGizmos(camera, GizmoSubset.PostImageEffects);
+            }
+        }
+        #endif
+
         context.Submit();
     }
 }
