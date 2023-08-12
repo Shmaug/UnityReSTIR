@@ -1,0 +1,99 @@
+#pragma max_recursion_depth 1
+
+#include "Lights.cginc"
+#include "Sampling.cginc"
+#include "Random.cginc"
+
+RWTexture2D<float4> _OutputImage;
+uint2 _OutputExtent;
+
+uint _Seed;
+
+float4x4 _CameraToWorldMatrix;
+float4x4 _WorldToCameraMatrix;
+float4x4 _CameraInverseProjectionMatrix;
+
+
+struct PathState {
+    float3 _Origin;
+    float _DirPdfW;
+    float3 _Direction;
+    uint _RngState;
+    float3 _Throughput;
+    uint pad;
+};
+RWStructuredBuffer<PathState> _State;
+
+uint4 Rand(uint2 id, inout PathState state) {
+    RandomSampler s = MakeRandomSampler(_Seed, id, state._RngState);
+    uint4 r = s.Next();
+    state._RngState = s.mState.w;
+    return r;
+}
+float4 Randf(uint2 id, inout PathState state) {
+    RandomSampler s = MakeRandomSampler(_Seed, id, state._RngState);
+    float4 r = s.NextFloat();
+    state._RngState = s.mState.w;
+    return r;
+}
+
+
+void Shade(uint2 id, inout PathState state) {
+    RayDesc ray = MakeRay(state._Origin, state._Direction);
+
+    ShadingData sd = TraceRay(ray);
+    if (!all(isfinite(sd._Position))) {
+        state._Throughput = 0;
+        return;
+    }
+    
+    float4 rnd = Randf(id, state);
+
+    float3 le = SampleRadiance(sd, GetLight(rnd.w * _LightCount), -ray.Direction);
+    _OutputImage[id] += float4(state._Throughput * le, 0);
+
+    state._Direction = SampleCosHemisphere(rnd.x, rnd.y);
+    state._DirPdfW   = CosHemispherePdfW(state._Direction.z);
+    state._Direction = sd.ToWorld(state._Direction);
+    state._Throughput *= sd.Brdf(-ray.Direction, state._Direction) / state._DirPdfW;
+    state._Origin = OffsetRayOrigin(sd._Position, sd.GeometryNormal(), state._Direction);
+}
+
+[shader("raygeneration")]
+void RenderFirstBounce() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id.xy >= _OutputExtent)) return;
+    
+    _OutputImage[id] = float4(0, 0, 0, 1);
+    
+    PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    state._Throughput = 1;
+    state._Origin    = mul(_CameraToWorldMatrix, float4(0, 0, 0, 1)).xyz;
+    state._Direction = mul(_CameraInverseProjectionMatrix, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
+    state._Direction = normalize(mul(_CameraToWorldMatrix, float4(state._Direction, 0)).xyz);
+
+    Shade(id, state);
+
+    _State[id.y*_OutputExtent.x + id.x] = state;
+}
+
+[shader("raygeneration")]
+void RenderNextBounce() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id.xy >= _OutputExtent)) return;
+
+    PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    state = _State[id.y*_OutputExtent.x + id.x];
+    if (!any(state._Throughput > 0))
+        return;
+    
+    Shade(id, state);
+    
+    _State[id.y*_OutputExtent.x + id.x] = state;
+}
+
+[shader("miss")]
+void Miss(inout ShadingData sd : SV_RayPayload) {
+	sd._Position = POS_INFINITY;
+    sd.BaseColor(0);
+}

@@ -1,0 +1,22 @@
+#pragma kernel Accumulate
+
+RWTexture2D<float4> _OutputImage;
+RWTexture2D<float4> _AccumulationImage;
+uint2 _OutputExtent;
+
+uint _Clear;
+
+[numthreads(8, 8, 1)]
+void Accumulate(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= _OutputExtent)) return;
+    
+    float4 color = _OutputImage[id.xy];
+    if (_Clear == 0) {
+        float4 prevColor = _AccumulationImage[id.xy];
+        color.rgb = lerp(prevColor.rgb, color.rgb, color.w / (prevColor.w + color.w));
+        color.w += prevColor.w;
+    }
+    
+    _AccumulationImage[id.xy] = color;
+    _OutputImage[id.xy] = float4(color.rgb, 1);
+}
