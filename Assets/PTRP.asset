@@ -13,4 +13,6 @@ MonoBehaviour:
   m_Name: PTRP
   m_EditorClassIdentifier: 
   _MaxDepth: 3
-  _TargetSampleCount: 64
+  _TargetSampleCount: 4
+  _DepthReuseCutoff: 0.0001
+  _NormalReuseCutoff: 1

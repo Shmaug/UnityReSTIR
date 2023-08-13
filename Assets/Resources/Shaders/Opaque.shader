@@ -7,6 +7,7 @@ Shader "Path Tracing/Opaque"
 		
 		_Cutoff ("Alpha Cutoff", Float) = 0.5
 		[NoScaleOffset]
+		[Normal]
 		_BumpMap ("Bump Map", 2D) = "bump" {}
 		_BumpScale ("Bump Scale", Float) = 1.0
 		
@@ -19,6 +20,7 @@ Shader "Path Tracing/Opaque"
 		_Glossiness ("Glossiness", Float) = 1.0
 		_GlossMapScale ("GlossMapScale", Float) = 1.0
 
+		[HDR]
 		_EmissionColor ("Emission", Color) = (0, 0, 0, 0)
 		[NoScaleOffset]
 		_EmissionMap ("Emission Map", 2D) = "white" {}

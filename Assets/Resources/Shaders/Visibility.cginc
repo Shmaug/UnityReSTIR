@@ -1,3 +1,8 @@
+#ifndef VISIBILITY_H
+#define VISIBILITY_H
+
+#include "Utils.cginc"
+
 RaytracingAccelerationStructure _AccelerationStructure;
 
 RayDesc MakeRay(float3 origin, float3 direction, float tmin = 0, float tmax = POS_INFINITY) {
@@ -35,3 +40,14 @@ bool Occluded(RayDesc ray) {
     ShadingData sd = TraceRay(ray, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH);
     return all(isfinite(sd._Position));
 }
+
+// intersects a plane centered at the origin
+float RayPlane(float3 origin, float3 dir, float3 normal) {
+	const float denom = dot(normal, dir);
+	if (abs(denom) > 0)
+		return -dot(origin, normal) / denom;
+	else
+		return POS_INFINITY;
+}
+
+#endif

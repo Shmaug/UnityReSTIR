@@ -1,67 +1,81 @@
 #pragma kernel Accumulate
 
-RWTexture2D<float4> _OutputImage;
-RWTexture2D<float4> _AlbedoImage;
-RWTexture2D<int4> _VisibilityImage;
-RWTexture2D<float2> _PrevUVs;
-RWTexture2D<float4> _AccumulationImage;
-RWTexture2D<int4> _PrevVisibilityImage;
+#include "Utils.cginc"
+
+RWTexture2D<float4> _Radiance;;
+RWTexture2D<float4> _Albedo;
+RWTexture2D<float4> _Positions;
+RWTexture2D<float4> _AccumulatedColor;
+RWTexture2D<float4> _PrevAccumulatedColor;
+RWTexture2D<float4> _PrevPositions;
 uint2 _OutputExtent;
+
+float4x4 _PrevWorldToClip;
 
 uint _Clear;
 uint _MaxSamples;
+
+float _DepthReuseCutoff;
+float _NormalReuseCutoff;
 
 [numthreads(8, 8, 1)]
 void Accumulate(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= _OutputExtent)) return;
     
-    float4 color = _OutputImage[id.xy];
+    float4 color = _Radiance[id.xy];
 
-    float3 albedo = _AlbedoImage[id.xy].rgb + 1e-2;
+    float3 albedo = _Albedo[id.xy].rgb + 1e-4;
     color.rgb /= albedo;
 
     if (_Clear == 0) {
-        int4 vis = _VisibilityImage[id.xy];
+        float4 pos = _Positions[id.xy];
+        if (all(isfinite(pos.xyz))) {
+            float4 prevClipPos = mul(_PrevWorldToClip, float4(pos.xyz, 1));
+            float2 prevUV = (prevClipPos.xy/prevClipPos.w)*.5 + .5;
+            if (all(prevUV >= 0) && all(prevUV < 1)) {
+                float3 normal = UnpackNormal(asuint(pos.w));
+                float2 prevPixel = prevUV * _OutputExtent - 0.5;
+                float2 wf = frac(prevPixel);
+                float4 prevColor = 0;
+                float wsum = 0;
+                for (int x = 0; x < 2; x++) {
+                    for (int y = 0; y < 2; y++) {
+                        int2 pxy = int2(prevPixel) + int2(x,y);
+                        if (any(pxy < 0) || any(pxy >= _OutputExtent))
+                            continue;
 
-        float2 prevPixel = _PrevUVs[id.xy] * _OutputExtent - 0.5;
-        
-        float2 wf = frac(prevPixel);
-        float4 prevColor = float4(0,0,0,0);
-        float wsum = 0;
-        for (int x = 0; x < 2; x++) {
-            for (int y = 0; y < 2; y++) {
-                int2 p = int2(prevPixel) + int2(x,y);
-                if (any(p < 0) || any(p >= _OutputExtent))
-                    continue;
+                        float4 p = _PrevPositions[pxy];
+                        if (!all(isfinite(p.xyz)))
+                            continue;
+                        float3 n = UnpackNormal(asuint(p.w));
+                        if (dot(normal, n) < _NormalReuseCutoff)
+                            continue;
+                        if (abs(dot(p.xyz - pos.xyz, n)) > _DepthReuseCutoff)
+                            continue;
+                            
+                        float wx = (x == 0) ? (1 - wf.x) : wf.x;
+                        float wy = (y == 0) ? (1 - wf.y) : wf.y;
+                        float w = wx*wy;
 
-                float4 c = _AccumulationImage[p];
-                int4 v = _PrevVisibilityImage[p];
-
-                float wx = (x == 0) ? (1 - wf.x) : wf.x;
-                float wy = (y == 0) ? (1 - wf.y) : wf.y;
-                float w = wx*wy;
-
-                if (abs(asfloat(v.x) - asfloat(vis.x)) > 0.01)
-                    w = 0;
-
-                prevColor += c * w;
-                wsum += w;
+                        prevColor += _PrevAccumulatedColor[pxy] * w;
+                        wsum += w;
+                    }
+                }
+                if (wsum > 0)
+                    prevColor /= wsum;
+                
+                if (any(isnan(prevColor)))
+                    prevColor = 0;
+                
+                float sum = prevColor.w + color.w;
+                if (_MaxSamples > 0)
+                    sum = min(sum, _MaxSamples);
+                color.rgb = lerp(prevColor.rgb, color.rgb, color.w / sum);
+                color.w = sum;
             }
         }
-        if (wsum > 0)
-            prevColor /= wsum;
-        
-        if (any(isnan(prevColor)))
-            prevColor = 0;
-        
-        float sum = prevColor.w + color.w;
-        if (_MaxSamples > 0)
-            sum = min(sum, _MaxSamples);
-        color.rgb = lerp(prevColor.rgb, color.rgb, color.w / sum);
-        color.w = sum;
     }
     
-    _AccumulationImage[id.xy] = color;
-
-    _OutputImage[id.xy] = float4(color.rgb * albedo, 1);
+    _AccumulatedColor[id.xy] = color;
+    _Radiance[id.xy] = float4(color.rgb * albedo, 1);
 }

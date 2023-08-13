@@ -4,10 +4,9 @@
 #include "Sampling.cginc"
 #include "Random.cginc"
 
-RWTexture2D<float4> _OutputImage;
-RWTexture2D<float4> _OutputAlbedo;
-RWTexture2D<int4>  _OutputVisibility;
-RWTexture2D<float2> _OutputPrevUVs;
+RWTexture2D<float4> _Radiance;
+RWTexture2D<float4> _Albedo;
+RWTexture2D<float4> _Positions;
 uint2 _OutputExtent;
 
 uint _Seed;
@@ -15,8 +14,6 @@ uint _Seed;
 float4x4 _CameraToWorld;
 float4x4 _WorldToCamera;
 float4x4 _CameraInverseProjection;
-float4x4 _PrevWorldToClip;
-
 
 struct PathState {
     float3 _Origin;
@@ -42,11 +39,17 @@ float4 Randf(uint2 id, inout PathState state) {
 }
 
 void Shade(uint2 id, inout PathState state, ShadingData sd, RayDesc ray) {
-    _OutputImage[id] += float4(state._Throughput * sd.Emission(), 0);
+    _Radiance[id] += float4(state._Throughput * sd.Emission(), 0);
+
+    if (!all(isfinite(sd._Position))) {
+        // background
+        state._Throughput = 0;
+        return;
+    }
 
     LightSampleRecord lr = SampleLight(sd, -ray.Direction, Rand(id, state));
     float3 radiance = lr._Radiance * lr._Brdf * lr._G / lr._PdfA;
-    _OutputImage[id] += float4(state._Throughput * radiance, 0);
+    _Radiance[id] += float4(state._Throughput * radiance, 0);
 
     state._Direction = SampleCosHemisphere(Randf(id, state).xy);
     state._DirPdfW   = CosHemispherePdfW(state._Direction.z);
@@ -55,43 +58,40 @@ void Shade(uint2 id, inout PathState state, ShadingData sd, RayDesc ray) {
     state._Origin = OffsetRayOrigin(sd._Position, sd.GeometryNormal(), state._Direction);
 }
 
-float2 ComputePrevUV(ShadingData sd) {
-    float4 prevClipPos = mul(_PrevWorldToClip, float4(sd._Position, 1));
-    return (-prevClipPos.xy/prevClipPos.w)*.5 + .5;
+void GetCameraRay(uint2 id, out float3 origin, out float3 direction) {
+    origin    = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
+    direction = mul(_CameraInverseProjection, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
+    direction = normalize(mul(_CameraToWorld, float4(direction, 0)).xyz);
 }
 
 [shader("raygeneration")]
-void RenderFirstBounce() {
+void TraceFirstBounce() {
     uint2 id = DispatchRaysIndex().xy;
     if (any(id >= _OutputExtent)) return;
     
-    _OutputImage[id] = float4(0, 0, 0, 1);
+    _Radiance[id] = float4(0, 0, 0, 1);
     
     PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     state._Throughput = 1;
-    state._Origin    = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
-    state._Direction = mul(_CameraInverseProjection, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
-    state._Direction = normalize(mul(_CameraToWorld, float4(state._Direction, 0)).xyz);
+    GetCameraRay(id, state._Origin, state._Direction);
 
     RayDesc ray = MakeRay(state._Origin, state._Direction);
+    
     ShadingData sd = TraceRay(ray);
-    if (all(isfinite(sd._Position))) {
-        _OutputAlbedo[id] = float4(sd.BaseColor(), 1);
-        _OutputVisibility[id] = int4(asint(length(sd._Position - ray.Origin)), sd._PackedShadingNormal, 0, 0);
-        _OutputPrevUVs[id] = ComputePrevUV(sd);
-        Shade(id, state, sd, ray);
-    } else {
-        _OutputAlbedo[id] = 1;
-        _OutputVisibility[id] = int4(asint(POS_INFINITY), 0, 0, 0);
-        _OutputPrevUVs[id] = (id + 0.5) / _OutputExtent;
-        state._Throughput = 0;
-    }
+
+    if (!all(isfinite(sd._Position)))
+        _Albedo[id] = 1;
+    else
+        _Albedo[id] = float4(sd.BaseColor(), 1);
+    _Positions[id] = float4(sd._Position, asfloat(sd._PackedGeometryNormal));
+
+    Shade(id, state, sd, ray);
 
     _State[id.y*_OutputExtent.x + id.x] = state;
 }
 
 [shader("raygeneration")]
-void RenderNextBounce() {
+void TraceNextBounce() {
     uint2 id = DispatchRaysIndex().xy;
     if (any(id >= _OutputExtent)) return;
 
@@ -101,12 +101,7 @@ void RenderNextBounce() {
         return;
     
     RayDesc ray = MakeRay(state._Origin, state._Direction);
-    ShadingData sd = TraceRay(ray);
-    if (all(isfinite(sd._Position))) {
-        Shade(id, state, sd, ray);
-    } else {
-        state._Throughput = 0;
-    }
+    Shade(id, state, TraceRay(ray), ray);
     
     _State[id.y*_OutputExtent.x + id.x] = state;
 }
@@ -115,4 +110,5 @@ void RenderNextBounce() {
 void Miss(inout ShadingData sd : SV_RayPayload) {
 	sd._Position = POS_INFINITY;
     sd.BaseColor(0);
+    sd.Emission(0);
 }

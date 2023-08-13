@@ -40,7 +40,7 @@ uint4 pcg4d(uint4 v) {
 struct RandomSampler {
 	uint4 mState;
         
-    void skipNext(const uint n = 1) {
+    void SkipNext(const uint n = 1) {
         mState.w += n;
     }
 

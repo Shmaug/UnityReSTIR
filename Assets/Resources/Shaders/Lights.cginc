@@ -92,21 +92,18 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
         dist = length(toLight);
         toLight /= dist;
         r._G = 1 / (dist*dist);
+
         if (l._Type == LightType::Spot) {
             float cosAngle = max(0, dot(-lightFwd, toLight));
-            float attenuation = cosAngle > l._Angle ? 1 : 0;
-            r._Radiance *= attenuation;
-            if (attenuation <= 0) {
-                return r;
-            }
+            if (cosAngle < l._Angle)
+                r._Radiance = 0;
         }
         break;
     }
-    case Rectangle:
-        break;
-    case Disc:
-        break;
     }
+
+    if (!any(r._Radiance > 0))
+        return r;
 
     r._Brdf = sd.Brdf(dirIn, toLight);
 
