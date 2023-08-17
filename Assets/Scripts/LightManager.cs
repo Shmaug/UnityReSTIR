@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Mathematics;
+using System.Collections.ObjectModel;
 
 public class LightManager {
     ComputeBuffer _LightBuffer = null;
@@ -22,7 +23,7 @@ public class LightManager {
         public float pad1;
     };
 
-    public void BuildLightBuffer(CommandBuffer cmd, RayTracingShader shader) {
+    public void BuildLightBuffer(CommandBuffer cmd, params RayTracingShader[] shaders) {
         List<GpuLight> lights = new List<GpuLight>();
         foreach (Light light in Object.FindObjectsByType<Light>(FindObjectsSortMode.None)) {
             if (!light.isActiveAndEnabled) continue;
@@ -48,7 +49,9 @@ public class LightManager {
 
         cmd.SetBufferData(_LightBuffer, lights.ToArray());
         
-        cmd.SetRayTracingBufferParam(shader, "_Lights", _LightBuffer);
-        cmd.SetRayTracingIntParam(shader, "_LightCount", lights.Count);
+        foreach (var shader in shaders) {
+            cmd.SetRayTracingBufferParam(shader, "_Lights", _LightBuffer);
+            cmd.SetRayTracingIntParam(shader, "_LightCount", lights.Count);
+        }
     }
 }

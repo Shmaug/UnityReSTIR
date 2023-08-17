@@ -23,6 +23,8 @@ void Accumulate(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= _OutputExtent)) return;
     
     float4 color = _Radiance[id.xy];
+    if (any(isnan(color.rgb)))
+        color.rgb = 0;
 
     float3 albedo = _Albedo[id.xy].rgb + 1e-4;
     color.rgb /= albedo;
@@ -57,12 +59,15 @@ void Accumulate(uint3 id : SV_DispatchThreadID) {
                         float wy = (y == 0) ? (1 - wf.y) : wf.y;
                         float w = wx*wy;
 
-                        prevColor += _PrevAccumulatedColor[pxy] * w;
+                        float4 c = _PrevAccumulatedColor[pxy];
+                        prevColor.rgb += pow(c.rgb, 1/2.2) * w;
+                        prevColor.w += c.w * w;
                         wsum += w;
                     }
                 }
                 if (wsum > 0)
                     prevColor /= wsum;
+                prevColor.rgb = pow(prevColor, 2.2);
                 
                 if (any(isnan(prevColor)))
                     prevColor = 0;

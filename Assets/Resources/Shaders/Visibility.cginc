@@ -2,6 +2,7 @@
 #define VISIBILITY_H
 
 #include "Utils.cginc"
+#include "Counters.cginc"
 
 RaytracingAccelerationStructure _AccelerationStructure;
 
@@ -31,12 +32,14 @@ float3 OffsetRayOrigin(float3 pos, float3 n, float3 dir) {
 }
 
 ShadingData TraceRay(RayDesc ray, uint flags = RAY_FLAG_NONE) {
+	IncrementCounter(DEBUG_COUNTER_RAYS);
     ShadingData sd;
     TraceRay(_AccelerationStructure, flags, 0xFF, 0, 1, 0, ray, sd);
     return sd;
 }
 
 bool Occluded(RayDesc ray) {
+	IncrementCounter(DEBUG_COUNTER_SHADOW_RAYS);
     ShadingData sd = TraceRay(ray, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH);
     return all(isfinite(sd._Position));
 }

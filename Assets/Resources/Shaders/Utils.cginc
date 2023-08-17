@@ -95,4 +95,19 @@ float3x3 MakeOrthonormal(float3 N) {
     return r;
 }
 
+float Luminance(const float3 color) { return dot(color, float3(0.2126, 0.7152, 0.0722)); }
+
+// stores 4 floats between 0 and 1
+struct PackedUnorm4 {
+	uint _Bits;
+    float Get(uint index) { return BF_GET(_Bits, index*8, 8) / float(255); }
+	void Set(uint index, float newValue) { BF_SET(_Bits, (uint)floor(saturate(newValue)*255 + 0.5), index*8, 8); }
+};
+// stores 4 floats between 0 and 1
+struct PackedUnorm16 {
+	uint4 _Bits;
+    float Get(uint index) { return BF_GET(_Bits[index/4], (index%4)*8, 8) / float(255); }
+	void Set(uint index, float newValue) { BF_SET(_Bits[index/4], (uint)floor(saturate(newValue)*255 + 0.5), (index%4)*8, 8); }
+};
+
 #endif

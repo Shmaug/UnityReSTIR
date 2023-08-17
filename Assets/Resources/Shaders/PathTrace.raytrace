@@ -1,114 +1,197 @@
 #pragma max_recursion_depth 1
 
-#include "Lights.cginc"
-#include "Sampling.cginc"
-#include "Random.cginc"
+//#define SAMPLE_LIGHTS
+#define TALBOT_MIS
+#define RECONNECTION
 
-RWTexture2D<float4> _Radiance;
-RWTexture2D<float4> _Albedo;
-RWTexture2D<float4> _Positions;
-uint2 _OutputExtent;
+#include "PathReservoir.cginc"
+
+RWStructuredBuffer<PathReservoir> _PathReservoirsIn;
+RWStructuredBuffer<PathReservoir> _PathReservoirsOut;
 
 uint _Seed;
-
-float4x4 _CameraToWorld;
-float4x4 _WorldToCamera;
-float4x4 _CameraInverseProjection;
-
-struct PathState {
-    float3 _Origin;
-    float _DirPdfW;
-    float3 _Direction;
-    uint _RngState;
-    float3 _Throughput;
-    uint pad;
-};
-RWStructuredBuffer<PathState> _State;
-
-uint4 Rand(uint2 id, inout PathState state) {
-    RandomSampler s = MakeRandomSampler(_Seed, id, state._RngState);
-    uint4 r = s.Next();
-    state._RngState = s.mState.w;
-    return r;
-}
-float4 Randf(uint2 id, inout PathState state) {
-    RandomSampler s = MakeRandomSampler(_Seed, id, state._RngState);
-    float4 r = s.NextFloat();
-    state._RngState = s.mState.w;
-    return r;
-}
-
-void Shade(uint2 id, inout PathState state, ShadingData sd, RayDesc ray) {
-    _Radiance[id] += float4(state._Throughput * sd.Emission(), 0);
-
-    if (!all(isfinite(sd._Position))) {
-        // background
-        state._Throughput = 0;
-        return;
-    }
-
-    LightSampleRecord lr = SampleLight(sd, -ray.Direction, Rand(id, state));
-    float3 radiance = lr._Radiance * lr._Brdf * lr._G / lr._PdfA;
-    _Radiance[id] += float4(state._Throughput * radiance, 0);
-
-    state._Direction = SampleCosHemisphere(Randf(id, state).xy);
-    state._DirPdfW   = CosHemispherePdfW(state._Direction.z);
-    state._Direction = sd.ToWorld(state._Direction);
-    state._Throughput *= sd.Brdf(-ray.Direction, state._Direction) / state._DirPdfW;
-    state._Origin = OffsetRayOrigin(sd._Position, sd.GeometryNormal(), state._Direction);
-}
-
-void GetCameraRay(uint2 id, out float3 origin, out float3 direction) {
-    origin    = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
-    direction = mul(_CameraInverseProjection, float4((float2(id + 0.5) / float2(_OutputExtent))*2-1, 0, 1)).xyz;
-    direction = normalize(mul(_CameraToWorld, float4(direction, 0)).xyz);
-}
-
-[shader("raygeneration")]
-void TraceFirstBounce() {
-    uint2 id = DispatchRaysIndex().xy;
-    if (any(id >= _OutputExtent)) return;
-    
-    _Radiance[id] = float4(0, 0, 0, 1);
-    
-    PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    state._Throughput = 1;
-    GetCameraRay(id, state._Origin, state._Direction);
-
-    RayDesc ray = MakeRay(state._Origin, state._Direction);
-    
-    ShadingData sd = TraceRay(ray);
-
-    if (!all(isfinite(sd._Position)))
-        _Albedo[id] = 1;
-    else
-        _Albedo[id] = float4(sd.BaseColor(), 1);
-    _Positions[id] = float4(sd._Position, asfloat(sd._PackedGeometryNormal));
-
-    Shade(id, state, sd, ray);
-
-    _State[id.y*_OutputExtent.x + id.x] = state;
-}
-
-[shader("raygeneration")]
-void TraceNextBounce() {
-    uint2 id = DispatchRaysIndex().xy;
-    if (any(id >= _OutputExtent)) return;
-
-    PathState state = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    state = _State[id.y*_OutputExtent.x + id.x];
-    if (!any(state._Throughput > 0))
-        return;
-    
-    RayDesc ray = MakeRay(state._Origin, state._Direction);
-    Shade(id, state, TraceRay(ray), ray);
-    
-    _State[id.y*_OutputExtent.x + id.x] = state;
-}
+uint _SpatialReuseIteration;
+uint _SpatialReuseSamples;
+float _SpatialReuseRadius;
+float _MCap;
 
 [shader("miss")]
 void Miss(inout ShadingData sd : SV_RayPayload) {
 	sd._Position = POS_INFINITY;
-    sd.BaseColor(0);
+    sd.BaseColor(1);
     sd.Emission(0);
+    sd._PackedGeometryNormal = 0;
+}
+
+uint _CanonicalSamples;
+
+[shader("raygeneration")]
+void TracePaths() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id >= _OutputExtent)) return;
+    
+    RayDesc ray = GetCameraRay(id);
+    ShadingData sd = TraceRay(ray);
+
+    _Albedo[id]    = float4(sd.BaseColor(), 1);
+    _Positions[id] = float4(sd._Position, asfloat(sd._PackedGeometryNormal));
+
+    PathReservoir r = MakeNullReservoir();
+
+    if (all(isfinite(sd._Position.xyz))) {
+        RandomSampler rng = MakeRandomSampler(_Seed, id, 0);
+        for (uint i = 0; i < _CanonicalSamples; i++) {
+            PathReservoir ri = SampleRadiance(sd, ray.Direction, rng);
+            ri.PrepareMerge(1/(float)_CanonicalSamples);
+            r.Merge(rng.NextFloat().x, ri);
+        }
+    }
+    r.FinalizeMerge();
+
+    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
+    _Radiance[id] = float4(sd.Emission() + r._Sample._Radiance * r._W, 1);
+}
+
+
+struct SampleLocations {
+    RandomSampler _RngSeed;
+    int2 _Center;
+
+    int2 Get(uint index) {
+        RandomSampler tmp = _RngSeed;;
+        tmp.SkipNext(index);
+        return _Center + int2(SampleConcentricDisc(tmp.NextFloat().xy) * _SpatialReuseRadius);
+    }
+};
+SampleLocations MakeSampleLocations(inout RandomSampler rng, int2 center) {
+    SampleLocations sg;
+    sg._RngSeed = rng;
+    sg._Center = center;
+    rng.SkipNext(_SpatialReuseSamples);
+    return sg;
+}
+
+float _ReuseX;
+bool InScreen(uint2 p) { return all(p < _OutputExtent) && p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX; }
+
+#ifdef TALBOT_MIS
+float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCenter, float centerM, int candidateIndex) {
+    float mi = 0;
+    float msum = centerM * Luminance(sample._Radiance) * jacobianToCenter;
+    if (candidateIndex == -1)
+        mi = msum;
+    for (uint i = 0; i < _SpatialReuseSamples; i++) {
+        uint2 p = sg.Get(i);
+        if (!InScreen(p))
+            continue;
+        if (!all(isfinite(_Positions[p].xyz)))
+            continue;
+
+        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        if (!(candidate._M > 0))
+            continue;
+
+        // Determine whether p could have generated sample by shifting sample to p's vertex
+
+        float jacobian;
+        PathSample shifted = ShiftTo(sample, _Positions[p], jacobian);
+        if (jacobian > 0) {
+            float m = candidate._M * Luminance(shifted._Radiance) * jacobian;
+            msum += m;
+            if (candidateIndex == i)
+                mi = m;
+        }
+    }
+    return msum > 0 ? mi/msum : 0;
+}
+#else
+float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCenter, float centerM, int candidateIndex) {
+    float mi = 0;
+    float msum = centerM;
+    if (candidateIndex == -1)
+        mi = centerM;
+    for (uint i = 0; i < _SpatialReuseSamples; i++) {
+        uint2 p = sg.Get(i);
+        if (!InScreen(p))
+            continue;
+        if (!all(isfinite(_Positions[p].xyz)))
+            continue;
+
+        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        if (!(candidate._M > 0))
+            continue;
+
+        // Determine whether p could have generated sample by shifting sample to p's vertex
+
+        float jacobian;
+        PathSample shifted = ShiftTo(sample, _Positions[p], jacobian);
+        if (jacobian > 0) {
+            float m = candidate._M;
+            msum += m;
+            if (candidateIndex == i)
+                mi = m;
+        }
+    }
+    return msum > 0 ? mi/msum : 0;
+}
+#endif
+
+[shader("raygeneration")]
+void SpatialReuse() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id >= _OutputExtent)) return;
+
+    if (!InScreen(id)) return;
+    
+    float4 vertex = _Positions[id];
+    if (!all(isfinite(vertex.xyz)))
+        return;
+    
+    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
+
+    float3 emission = _Radiance[id].rgb - (r._Sample._Radiance * r._W);
+
+    RandomSampler rng = MakeRandomSampler(_Seed, id, (1+_SpatialReuseIteration)*_MaxBounces*100);
+    SampleLocations sg = MakeSampleLocations(rng, id);
+
+    float centerM = r._M;
+    r.PrepareMerge(ComputeMisWeight(sg, r._Sample, 1, centerM, -1));
+
+    for (uint i = 0; i < _SpatialReuseSamples; i++) {
+        int2 p = sg.Get(i);
+        if (!InScreen(p))
+            continue;
+        if (!all(isfinite(_Positions[p].xyz)))
+            continue;
+
+        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        if (candidate._M <= 0)
+            continue;
+
+        if (candidate._W <= 0 || isnan(candidate._W)) {
+            r._M += candidate._M;
+            continue;
+        }
+        
+        // shift candidate's sample to here
+        float jacobian;
+        candidate._Sample = ShiftTo(candidate._Sample, vertex, jacobian);
+
+        if (jacobian <= 0 || isnan(jacobian)) {
+            r._M += candidate._M;
+            continue;
+        }
+        
+        candidate.PrepareMerge(ComputeMisWeight(sg, candidate._Sample, jacobian, centerM, i), jacobian);
+    
+        r.Merge(rng.NextFloat().x, candidate);
+    }
+    
+    if (r._W > 0)
+        r.FinalizeMerge();
+    
+    r._M = min(r._M, _MCap);
+    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
+
+    _Radiance[id] = float4(emission + r._Sample._Radiance * r._W, 1);
 }

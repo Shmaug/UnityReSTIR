@@ -1,6 +1,7 @@
+#ifndef LIGHT_H
+#define LIGHT_H
+
 #include "ShadingData.cginc"
-// Upgrade NOTE: excluded shader from OpenGL ES 2.0 because it uses non-square matrices
-#pragma exclude_renderers gles
 #include "Visibility.cginc"
 #include "Random.cginc"
 #include "Sampling.cginc"
@@ -57,18 +58,14 @@ uint _LightCount;
 
 struct LightSampleRecord {
     float3 _Radiance;
-    float _PdfA;
-    float3 _Brdf;
-    float _G;
+    float _PdfW;
 };
 LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
     Light l = _Lights[rnd.z % _LightCount];
 
     LightSampleRecord r;
     r._Radiance = l._Color;
-    r._PdfA = 1 / (float)_LightCount;
-    r._Brdf = 0;
-    r._G = 0;
+    r._PdfW = 1 / (float)_LightCount;
     
     float3 lightFwd = normalize(float3(l._LightToWorld[0][2], l._LightToWorld[1][2], l._LightToWorld[2][2]));
 
@@ -78,11 +75,10 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
     switch (l._Type) {
     default:
     case LightType::Directional:
-        r._G = 1;
         toLight = -lightFwd;
         if (l._Angle > 0) {
             toLight = mul(SampleUniformCone(UINT_TO_FLOAT_01(rnd.xy), l._Angle), MakeOrthonormal(toLight));
-            //r._PdfA *= UniformConePdfW(l._Angle);
+            //r._PdfW *= UniformConePdfW(l._Angle);
         }
         break;
     case LightType::Point:
@@ -91,7 +87,8 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
         toLight = lightPos - sd._Position;
         dist = length(toLight);
         toLight /= dist;
-        r._G = 1 / (dist*dist);
+
+        r._PdfW *= dist*dist;
 
         if (l._Type == LightType::Spot) {
             float cosAngle = max(0, dot(-lightFwd, toLight));
@@ -105,13 +102,15 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
     if (!any(r._Radiance > 0))
         return r;
 
-    r._Brdf = sd.Brdf(dirIn, toLight);
+    r._Radiance *= sd.Brdf(dirIn, toLight);
 
-    if (any(r._Brdf > 0)) {
-        if (Occluded(MakeRay(OffsetRayOrigin(sd._Position, sd.GeometryNormal(), toLight), toLight, 0, dist))) {
-            r._Radiance = 0;
-        }
-    }
+    if (!any(r._Radiance > 0))
+        return r;
+
+    if (Occluded(MakeRay(OffsetRayOrigin(sd._Position, sd.GeometryNormal(), toLight), toLight, 0, dist)))
+        r._Radiance = 0;
 
     return r;
 }
+
+#endif

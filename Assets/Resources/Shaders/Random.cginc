@@ -1,6 +1,8 @@
 #ifndef RANDOM_H
 #define RANDOM_H
 
+#include "Utils.cginc"
+
 // xxhash (https://github.com/Cyan4973/xxHash)
 //   From https://www.shadertoy.com/view/Xt3cDn
 uint xxhash32(const uint p) {
@@ -38,15 +40,21 @@ uint4 pcg4d(uint4 v) {
 #define UINT_TO_FLOAT_01(u) (asfloat(0x3f800000 | ((u) >> 9)) - 1)
 
 struct RandomSampler {
-	uint4 mState;
+	uint2 _State;
         
     void SkipNext(const uint n = 1) {
-        mState.w += n;
+		uint idx = BF_GET(_State[0], 0, 16);
+        idx += n;
+		BF_SET(_State[0], idx, 0, 16);
     }
 
     uint4 Next() {
-        mState.w++;
-        return pcg4d(mState);
+        SkipNext();
+        return pcg4d(uint4(
+			BF_GET(_State[0],  0, 16), 
+			BF_GET(_State[0], 16, 16), 
+			BF_GET(_State[1],  0, 16), 
+			BF_GET(_State[1], 16, 16) ) );
     }
     float4 NextFloat() {
         return UINT_TO_FLOAT_01(Next());
@@ -55,7 +63,11 @@ struct RandomSampler {
 
 RandomSampler MakeRandomSampler(uint seed, uint2 index, uint offset = 0) {
     RandomSampler s;
-    s.mState = uint4(index, seed, offset);
+	s._State = 0;
+	BF_SET(s._State[0], offset, 0, 16);
+	BF_SET(s._State[0], seed, 16, 16);
+	BF_SET(s._State[1], index.x,  0, 16);
+	BF_SET(s._State[1], index.y, 16, 16);
     return s;
 }
 
