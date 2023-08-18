@@ -57,16 +57,18 @@ Shader "Path Tracing/Opaque"
 				sd.BaseColor(_Color * _MainTex.SampleLevel(sampler_MainTex, uv, 0).rgb);
 				sd.Emission(_EmissionColor * _EmissionMap.SampleLevel(sampler_EmissionMap, uv, 0).rgb);
 				sd.Specular      (0.5);
+				sd.SpecularTint  (0.5);
 				sd.Sheen         (0.5);
-				sd.Metallic      (0.0);
+				sd.SheenTint     (0.5);
+				sd.Metallic      (0);
 				sd.Roughness     (0.5);
 				sd.Anisotropic   (0.5);
-				sd.Subsurface    (0.0);
-				sd.Clearcoat     (0.0);
+				sd.Subsurface    (0);
+				sd.Clearcoat     (0);
 				sd.ClearcoatGloss(0.5);
-				sd.Transmission  (0.0);
-				sd.Eta           (0.5);
-			}			
+				sd.Transmission  (0);
+				sd.Eta           (1.5);
+			}
 
 			ENDHLSL
 		}

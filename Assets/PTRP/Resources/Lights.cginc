@@ -1,10 +1,9 @@
 #ifndef LIGHT_H
 #define LIGHT_H
 
-#include "ShadingData.cginc"
+#include "BRDF.cginc"
 #include "Visibility.cginc"
 #include "Random.cginc"
-#include "Sampling.cginc"
 
 // from Light.cs
 enum LightType {
@@ -102,7 +101,7 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
     if (!any(r._Radiance > 0))
         return r;
 
-    r._Radiance *= sd.Brdf(dirIn, toLight);
+    r._Radiance *= EvalBrdf(sd, dirIn, toLight);
 
     if (!any(r._Radiance > 0))
         return r;

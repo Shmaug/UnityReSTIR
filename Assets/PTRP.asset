@@ -12,13 +12,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 73efe01495f02794898ebfcc97156d23, type: 3}
   m_Name: PTRP
   m_EditorClassIdentifier: 
-  _CanonicalSamples: 1
-  _MaxBounces: 5
+  _MaxBounces: 3
   _SpatialReusePasses: 2
-  _SpatialReuseSamples: 3
+  _SpatialReuseSamples: 2
   _SpatialReuseRadius: 64
   _MCap: 30
-  _TargetSampleCount: 8
+  _TargetSampleCount: 4
   _DepthReuseCutoff: 0.01
   _NormalReuseCutoff: 1
   _DebugCounters: 0
@@ -32,5 +31,5 @@ MonoBehaviour:
     SHIFT_SUCCESSES     503551
 
 '
-  _ReuseX: -0.5
+  _ReuseX: 0.25
   _PauseRendering: 0

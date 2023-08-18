@@ -1,10 +1,10 @@
 #pragma max_recursion_depth 1
 
-//#define SAMPLE_LIGHTS
-#define TALBOT_MIS
-#define RECONNECTION
+#define SAMPLE_LIGHTS
+//#define TALBOT_RMIS
+//#define RECONNECTION
 
-#include "PathReservoir.cginc"
+#include "PathGeneration.cginc"
 
 RWStructuredBuffer<PathReservoir> _PathReservoirsIn;
 RWStructuredBuffer<PathReservoir> _PathReservoirsOut;
@@ -23,8 +23,6 @@ void Miss(inout ShadingData sd : SV_RayPayload) {
     sd._PackedGeometryNormal = 0;
 }
 
-uint _CanonicalSamples;
-
 [shader("raygeneration")]
 void TracePaths() {
     uint2 id = DispatchRaysIndex().xy;
@@ -36,17 +34,12 @@ void TracePaths() {
     _Albedo[id]    = float4(sd.BaseColor(), 1);
     _Positions[id] = float4(sd._Position, asfloat(sd._PackedGeometryNormal));
 
-    PathReservoir r = MakeNullReservoir();
+    PathReservoir r = MakeReservoir();
 
     if (all(isfinite(sd._Position.xyz))) {
         RandomSampler rng = MakeRandomSampler(_Seed, id, 0);
-        for (uint i = 0; i < _CanonicalSamples; i++) {
-            PathReservoir ri = SampleRadiance(sd, ray.Direction, rng);
-            ri.PrepareMerge(1/(float)_CanonicalSamples);
-            r.Merge(rng.NextFloat().x, ri);
-        }
+        r = SampleRadiance(sd, ray.Direction, rng);
     }
-    r.FinalizeMerge();
 
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
     _Radiance[id] = float4(sd.Emission() + r._Sample._Radiance * r._W, 1);
@@ -74,17 +67,18 @@ SampleLocations MakeSampleLocations(inout RandomSampler rng, int2 center) {
 float _ReuseX;
 bool InScreen(uint2 p) { return all(p < _OutputExtent) && p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX; }
 
-#ifdef TALBOT_MIS
-float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCenter, float centerM, int candidateIndex) {
+#ifdef TALBOT_RMIS
+float ComputeMisWeight(SampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
     float mi = 0;
-    float msum = centerM * Luminance(sample._Radiance) * jacobianToCenter;
+    float msum = centerM * Luminance(sample._Sample._Radiance) * jacobianToCenter;
     if (candidateIndex == -1)
         mi = msum;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         uint2 p = sg.Get(i);
         if (!InScreen(p))
             continue;
-        if (!all(isfinite(_Positions[p].xyz)))
+        float4 vp = _Positions[p]
+        if (!all(isfinite(vp.xyz)))
             continue;
 
         PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
@@ -94,7 +88,7 @@ float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCe
         // Determine whether p could have generated sample by shifting sample to p's vertex
 
         float jacobian;
-        PathSample shifted = ShiftTo(sample, _Positions[p], jacobian);
+        PathSample shifted = ShiftTo(sample._Sample, vp, jacobian);
         if (jacobian > 0) {
             float m = candidate._M * Luminance(shifted._Radiance) * jacobian;
             msum += m;
@@ -104,35 +98,41 @@ float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCe
     }
     return msum > 0 ? mi/msum : 0;
 }
+float FinalizeMisWeight(SampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
+    return 1;
+}
 #else
-float ComputeMisWeight(SampleLocations sg, PathSample sample, float jacobianToCenter, float centerM, int candidateIndex) {
-    float mi = 0;
+float ComputeMisWeight(SampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
+    return sample._M;
+}
+float FinalizeMisWeight(SampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
     float msum = centerM;
-    if (candidateIndex == -1)
-        mi = centerM;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         uint2 p = sg.Get(i);
         if (!InScreen(p))
             continue;
-        if (!all(isfinite(_Positions[p].xyz)))
+        float4 vp = _Positions[p];
+        if (!all(isfinite(vp.xyz)))
             continue;
 
         PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
         if (!(candidate._M > 0))
             continue;
 
+        if (i == selectedIndex) {
+            msum += candidate._M;
+            continue;
+        }
+
         // Determine whether p could have generated sample by shifting sample to p's vertex
 
         float jacobian;
-        PathSample shifted = ShiftTo(sample, _Positions[p], jacobian);
+        PathSample shifted = ShiftTo(sample._Sample, vp, jacobian);
         if (jacobian > 0) {
-            float m = candidate._M;
-            msum += m;
-            if (candidateIndex == i)
-                mi = m;
+            msum += candidate._M;
         }
     }
-    return msum > 0 ? mi/msum : 0;
+    return msum > 0 ? 1/msum : 0;
 }
 #endif
 
@@ -154,8 +154,10 @@ void SpatialReuse() {
     RandomSampler rng = MakeRandomSampler(_Seed, id, (1+_SpatialReuseIteration)*_MaxBounces*100);
     SampleLocations sg = MakeSampleLocations(rng, id);
 
+    int selectedIndex = -1;
+
     float centerM = r._M;
-    r.PrepareMerge(ComputeMisWeight(sg, r._Sample, 1, centerM, -1));
+    r.PrepareMerge(ComputeMisWeight(sg, r, 1, centerM, -1));
 
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         int2 p = sg.Get(i);
@@ -182,13 +184,16 @@ void SpatialReuse() {
             continue;
         }
         
-        candidate.PrepareMerge(ComputeMisWeight(sg, candidate._Sample, jacobian, centerM, i), jacobian);
+        candidate.PrepareMerge(ComputeMisWeight(sg, candidate, jacobian, centerM, i), jacobian);
     
-        r.Merge(rng.NextFloat().x, candidate);
+        if (r.Merge(rng.NextFloat().x, candidate))
+            selectedIndex = i;
     }
     
-    if (r._W > 0)
+    if (r._W > 0) {
+        r._W *= FinalizeMisWeight(sg, r, centerM, selectedIndex);
         r.FinalizeMerge();
+    }
     
     r._M = min(r._M, _MCap);
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;

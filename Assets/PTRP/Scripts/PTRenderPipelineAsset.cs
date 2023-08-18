@@ -4,7 +4,6 @@ using UnityEngine.Rendering;
 [CreateAssetMenu(menuName = "Rendering/PTRenderPipelineAsset")]
 public class PTRenderPipelineAsset : RenderPipelineAsset {
     [Header("Path tracing")]
-    public uint _CanonicalSamples = 1;
     public uint _MaxBounces = 2;
 
     [Header("ReSTIR")]

@@ -40,9 +40,9 @@ public class PTRenderPipeline : RenderPipeline {
 
     public PTRenderPipeline(PTRenderPipelineAsset asset) {
         _Asset = asset;
-        _PathTracerShader   = Resources.Load<RayTracingShader>("Shaders/PathTrace");
-        _AccumulateShader = Resources.Load<ComputeShader>("Shaders/Accumulate");
-        _DefaultMaterial = new Material(Resources.Load<Shader>("Shaders/Opaque"));
+        _PathTracerShader = Resources.Load<RayTracingShader>("PathTrace");
+        _AccumulateShader = Resources.Load<ComputeShader>("Accumulate");
+        _DefaultMaterial = new Material(Resources.Load<Shader>("Opaque"));
         _LightManager = new LightManager();
     }
     protected override void Dispose(bool disposing) {
@@ -151,7 +151,6 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Positions", positions);
             cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", new int[]{ w, h });
             cmd.SetRayTracingIntParam(_PathTracerShader, "_MaxBounces", (int)_Asset._MaxBounces);
-            cmd.SetRayTracingIntParam(_PathTracerShader, "_CanonicalSamples", (int)_Asset._CanonicalSamples);
             
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[0]);
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn", _PathReservoirsBuffers[1]);
