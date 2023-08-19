@@ -1,13 +1,25 @@
 #pragma kernel CopyReservoirs
+#pragma kernel OutputRadiance
 
 #include "PathReservoir.cginc"
 
 RWStructuredBuffer<PathReservoir> _Src;
 RWStructuredBuffer<PathReservoir> _Dst;
-uint _Count;
+uint2 _OutputExtent;
+
+RWTexture2D<float4> _Radiance;
 
 [numthreads(64, 1, 1)]
 void CopyReservoirs(uint3 id : SV_DispatchThreadID) {
-    if (id.x < _Count)
+    if (id.x < _OutputExtent.x)
         _Dst[id.x] = _Src[id.x];
+}
+
+[numthreads(8, 8, 1)]
+void OutputRadiance(uint3 id : SV_DispatchThreadID) {
+    if (all(id.xy < _OutputExtent)) {
+        PathReservoir r = _Src[id.y*_OutputExtent.x + id.x];
+        if (r._W > 0)
+            _Radiance[id.xy] += float4(r._Sample._Radiance * r._W, 0);
+    }
 }

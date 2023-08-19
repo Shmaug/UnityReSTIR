@@ -13,12 +13,12 @@ MonoBehaviour:
   m_Name: PTRP
   m_EditorClassIdentifier: 
   _MaxBounces: 2
-  _TemporalReuse: 1
+  _TemporalReuse: 0
   _SpatialReusePasses: 2
-  _SpatialReuseSamples: 1
+  _SpatialReuseSamples: 2
   _SpatialReuseRadius: 64
   _MCap: 4
-  _TargetSampleCount: 0
+  _TargetSampleCount: 32
   _DepthReuseCutoff: 0.01
   _NormalReuseCutoff: 1
   _DebugCounters: 0
@@ -32,5 +32,4 @@ MonoBehaviour:
     SHIFT_SUCCESSES     -2960686
 
 '
-  _ReuseX: 0
-  _PauseRendering: 0
+  _ReuseX: 0.5

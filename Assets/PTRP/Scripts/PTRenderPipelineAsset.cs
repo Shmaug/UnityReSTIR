@@ -22,9 +22,6 @@ public class PTRenderPipelineAsset : RenderPipelineAsset {
     public bool _DebugCounters = false;
     public string _DebugCounterText;
     public float _ReuseX = 0;
-
-    public bool _PauseRendering = false;
-
     protected override RenderPipeline CreatePipeline() {
         return new PTRenderPipeline(this);
     }

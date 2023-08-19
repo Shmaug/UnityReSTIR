@@ -1,7 +1,8 @@
 #pragma max_recursion_depth 1
 
 #define SAMPLE_LIGHTS
-//#define TALBOT_RMIS
+#define TALBOT_RMIS_TEMPORAL
+//#define TALBOT_RMIS_SPATIAL
 //#define RECONNECTION
 
 #include "PathGeneration.cginc"
@@ -42,7 +43,7 @@ void TracePaths() {
     }
 
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
-    _Radiance[id] = float4(sd.Emission() + r._Sample._Radiance * r._W, 1);
+    _Radiance[id] = float4(sd.Emission(), 1);
 }
 
 float _ReuseX;
@@ -52,71 +53,86 @@ RWStructuredBuffer<PathReservoir> _PrevReservoirs;
 RWTexture2D<float4> _PrevPositions;
 float4x4 _PrevWorldToClip;
 
-[shader("raygeneration")]
-void TemporalReuse() {
-    uint2 id = DispatchRaysIndex().xy;
-    if (any(id >= _OutputExtent)) return;
+float Mis(float a, float b) { return a / (a + b); }
 
-    if (!InScreen(id)) return;
+PathReservoir TemporalReuse(uint2 id) {
+    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
+
+    if (!InScreen(id))
+        return r;
     
     float4 vertex = _Positions[id];
     if (!all(isfinite(vertex.xyz)))
-        return;
-        
+        return r;
+    
     float4 prevClipPos = mul(_PrevWorldToClip, float4(vertex.xyz, 1));
     uint2 prevPixel = ((prevClipPos.xy/prevClipPos.w)*.5 + .5) * _OutputExtent;
     if (!InScreen(prevPixel))
-        return;
+        return r;
 
     float4 prevVertex = _PrevPositions[prevPixel];
     if (!all(isfinite(prevVertex.xyz)))
-        return;
-        
-    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
+        return r;
+    
+    PathReservoir candidate = _PrevReservoirs[prevPixel.y*_OutputExtent.x + prevPixel.x];
+    if (!(candidate._M > 0))
+        return r;
+    if (!(candidate._W > 0)) {
+        r._M += candidate._M;
+        return r;
+    }
 
-    float3 emission = _Radiance[id].rgb - (r._Sample._Radiance * r._W);
+    float pr = Luminance(candidate._Sample._Radiance);
+    float jacobianToCenter;
+    candidate._Sample = ShiftTo(candidate._Sample, vertex, jacobianToCenter);
+    if (!(jacobianToCenter > 0)) {
+        r._M += candidate._M;
+        return r;
+    }    
+    
+    #ifdef TALBOT_RMIS_TEMPORAL
+    {
+        float mi = r._M * Luminance(r._Sample._Radiance);
+        float msum = mi;
+    
+        float jacobianToPrev;
+        PathSample shifted = ShiftTo(r._Sample, prevVertex, jacobianToPrev);
+        msum += candidate._M * Luminance(shifted._Radiance) * jacobianToPrev;
+        
+        r.PrepareMerge(msum > 0 ? mi/msum : 0);
+    }
+    {
+        float msum = r._M * Luminance(candidate._Sample._Radiance) * jacobianToCenter;
+        float mi = candidate._M * pr / jacobianToCenter;
+        msum += mi;
+        
+        candidate.PrepareMerge(msum > 0 ? mi/msum : 0, jacobianToCenter);
+    }
+    #else
+    float jacobianToPrev;
+    PathSample s = ShiftTo(r._Sample, prevVertex, jacobianToPrev);
+    r.PrepareMerge(Mis(r._M, jacobianToPrev > 0 ? candidate._M : 0));
+    
+    candidate.PrepareMerge(Mis(jacobianToCenter > 0 ? candidate._M : 0, r._M), jacobianToCenter);
+    #endif
 
     RandomSampler rng = MakeRandomSampler(_Seed, id, 1000);
 
-    {
-        PathReservoir candidate = _PrevReservoirs[prevPixel.y*_OutputExtent.x + prevPixel.x];
-        if (!(candidate._M > 0))
-            return;
-        if (candidate._W > 0) {
-            float candidateM = candidate._M * Luminance(candidate._Sample._Radiance);
-            
-            float jacobianToHere;
-            candidate._Sample = ShiftTo(candidate._Sample, vertex, jacobianToHere);
+    r.Merge(rng.NextFloat().x, candidate);
 
-            float jacobianToThere;
-            PathSample s = ShiftTo(r._Sample, prevVertex, jacobianToThere);
-            /*
-            if (jacobianToHere > 0) {
-                candidateM /= jacobianToHere;
-                candidateM /= candidateM + Luminance(candidate._Sample._Radiance)*r._M;
-                candidate.PrepareMerge(candidateM, jacobianToHere);
-            } else
-                candidate._W = 0;
+    r.FinalizeMerge();
+    
+    return r;
+}
 
-            float myM = r._M * Luminance(r._Sample._Radiance);
-            myM /= myM + candidate._M*Luminance(s._Radiance)*jacobianToThere;
-            r.PrepareMerge(myM);
-            /*/
-            r.PrepareMerge(jacobianToThere > 0 ? r._M / (r._M + candidate._M) : 1);
-            candidate.PrepareMerge(candidate._M / (r._M + candidate._M), jacobianToHere);
-            //*/
-
-            r.Merge(rng.NextFloat().x, candidate);
-
-            r.FinalizeMerge();
-        } else
-            r._M += candidate._M;
-    }
-
+[shader("raygeneration")]
+void TemporalReuse() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id >= _OutputExtent))
+        return;
+    PathReservoir r = TemporalReuse(id);
     r._M = min(r._M, _MCap);
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
-
-    _Radiance[id] = float4(emission + r._Sample._Radiance * r._W, 1);
 }
 
 
@@ -138,7 +154,7 @@ SpatialSampleLocations MakeSpatialSampleLocations(inout RandomSampler rng, int2 
     return sg;
 }
 
-#ifdef TALBOT_RMIS
+#ifdef TALBOT_RMIS_SPATIAL
 float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
     float mi = 0;
     float msum = centerM * Luminance(sample._Sample._Radiance) * jacobianToCenter;
@@ -148,7 +164,7 @@ float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, f
         uint2 p = sg.Get(i);
         if (!InScreen(p))
             continue;
-        float4 vp = _Positions[p]
+        float4 vp = _Positions[p];
         if (!all(isfinite(vp.xyz)))
             continue;
 
@@ -207,21 +223,16 @@ float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, 
 }
 #endif
 
-[shader("raygeneration")]
-void SpatialReuse() {
-    uint2 id = DispatchRaysIndex().xy;
-    if (any(id >= _OutputExtent)) return;
+PathReservoir SpatialReuse(uint2 id) {
+    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
 
-    if (!InScreen(id)) return;
+    if (!InScreen(id))
+        return r;
     
     float4 vertex = _Positions[id];
     if (!all(isfinite(vertex.xyz)))
-        return;
+        return r;
     
-    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
-
-    float3 emission = _Radiance[id].rgb - (r._Sample._Radiance * r._W);
-
     RandomSampler rng = MakeRandomSampler(_Seed, id, (2+_SpatialReuseIteration)*1000);
     SpatialSampleLocations sg = MakeSpatialSampleLocations(rng, id);
 
@@ -265,9 +276,17 @@ void SpatialReuse() {
         r._W *= FinalizeSpatialMisWeight(sg, r, centerM, selectedIndex);
         r.FinalizeMerge();
     }
+    return r;
+}
+
+[shader("raygeneration")]
+void SpatialReuse() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id >= _OutputExtent))
+        return;
+
+    PathReservoir r = SpatialReuse(id);
     
     r._M = min(r._M, _MCap);
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
-
-    _Radiance[id] = float4(emission + r._Sample._Radiance * r._W, 1);
 }

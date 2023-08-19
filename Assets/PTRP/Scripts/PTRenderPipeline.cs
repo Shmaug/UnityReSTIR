@@ -157,7 +157,7 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Radiance", renderTarget);
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Albedo", albedo);
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Positions", positions);
-            cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", new int[]{ w, h });
+            cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", w, h);
             cmd.SetRayTracingIntParam(_PathTracerShader, "_MaxBounces", (int)_Asset._MaxBounces);
             
             cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraToWorld",           camera.cameraToWorldMatrix);
@@ -227,11 +227,22 @@ public class PTRenderPipeline : RenderPipeline {
         
         // copy final reservoirs for future reuse
         if (_Asset._TemporalReuse) {
-            cmd.SetComputeBufferParam(_CopyReservoirsShader, 0, "_Src", _PathReservoirsBuffers[currentReservoirBuffer]);
-            cmd.SetComputeBufferParam(_CopyReservoirsShader, 0, "_Dst", accumData._Reservoirs);
-            cmd.SetComputeIntParam(_CopyReservoirsShader, "_Count", w*h);
-            _CopyReservoirsShader.GetKernelThreadGroupSizes(0, out uint kw, out uint _, out _);
-            cmd.DispatchCompute(_CopyReservoirsShader, 0, (w*h + (int)kw-1)/(int)kw, 1, 1);
+            int copyReservoirKernel = _CopyReservoirsShader.FindKernel("CopyReservoirs");
+            cmd.SetComputeBufferParam(_CopyReservoirsShader, copyReservoirKernel, "_Src", _PathReservoirsBuffers[currentReservoirBuffer]);
+            cmd.SetComputeBufferParam(_CopyReservoirsShader, copyReservoirKernel, "_Dst", accumData._Reservoirs);
+            cmd.SetComputeIntParams(_CopyReservoirsShader, "_OutputExtent", w*h, 1);
+            _CopyReservoirsShader.GetKernelThreadGroupSizes(copyReservoirKernel, out uint kw, out uint _, out _);
+            cmd.DispatchCompute(_CopyReservoirsShader, copyReservoirKernel, (w*h + (int)kw-1)/(int)kw, 1, 1);
+        }
+
+        // output radiance from final reservoir
+        {
+            int otuputRadianceKernel = _CopyReservoirsShader.FindKernel("OutputRadiance");
+            cmd.SetComputeTextureParam(_CopyReservoirsShader, otuputRadianceKernel, "_Radiance", renderTarget);
+            cmd.SetComputeBufferParam(_CopyReservoirsShader, otuputRadianceKernel, "_Src", _PathReservoirsBuffers[currentReservoirBuffer]);
+            cmd.SetComputeIntParams(_CopyReservoirsShader, "_OutputExtent", w, h);
+            _CopyReservoirsShader.GetKernelThreadGroupSizes(otuputRadianceKernel, out uint kw, out uint kh, out _);
+            cmd.DispatchCompute(_CopyReservoirsShader, otuputRadianceKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
         }
 
         // Accumulate/denoise
@@ -248,7 +259,7 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevAccumulatedColor", accumData._AccumulationTexture);
             cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevPositions",        accumData._PositionsTexture);
             cmd.SetComputeBufferParam (_AccumulateShader, accumKernel, "_DebugCounters", _DebugCounterBuffer);
-            cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", new int[]{ w, h });
+            cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", w, h);
             cmd.SetComputeMatrixParam (_AccumulateShader, "_PrevWorldToClip", accumData._WorldToClip);
             cmd.SetComputeIntParams   (_AccumulateShader, "_Clear", hasHistory ? 0 : 1);
             cmd.SetComputeIntParams   (_AccumulateShader, "_MaxSamples", (int)_Asset._TargetSampleCount);
@@ -274,9 +285,11 @@ public class PTRenderPipeline : RenderPipeline {
     float lastCounterPrint = 0;
     protected override void Render(ScriptableRenderContext context, List<Camera> cameras) {
         CommandBuffer cmd = new CommandBuffer();
-        if (_Asset._PauseRendering) {
-            cmd.ClearRenderTarget(true, true, Color.magenta);
-        } else {
+        bool focused = Application.isFocused;
+        #if UNITY_EDITOR
+        focused = UnityEditor.EditorApplication.isFocused;
+        #endif
+        if (focused) {
             cmd.ClearRenderTarget(true, true, Color.black);
             
             if (BuildAccelerationStructure(cmd)) {            
