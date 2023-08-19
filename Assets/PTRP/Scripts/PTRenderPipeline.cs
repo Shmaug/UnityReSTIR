@@ -1,6 +1,5 @@
 using System.Linq;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Mathematics;
@@ -29,6 +28,7 @@ public class PTRenderPipeline : RenderPipeline {
     ComputeShader _CopyReservoirsShader;
     ComputeShader _AccumulateShader;
     Material _DefaultMaterial;
+    Material _BlitMaterial;
     
     Dictionary<Material, MaterialPropertyBlock> _StandardMaterialMap = new Dictionary<Material, MaterialPropertyBlock>();
     Dictionary<Camera, AccumulationData> _AccumulationData = new Dictionary<Camera, AccumulationData>();
@@ -46,10 +46,12 @@ public class PTRenderPipeline : RenderPipeline {
         _CopyReservoirsShader = Resources.Load<ComputeShader>("CopyReservoirs");
         _AccumulateShader = Resources.Load<ComputeShader>("Accumulate");
         _DefaultMaterial = new Material(Resources.Load<Shader>("Opaque"));
+        _BlitMaterial = new Material(Resources.Load<Shader>("BlitResult"));
         _LightManager = new LightManager();
     }
     protected override void Dispose(bool disposing) {
         Object.DestroyImmediate(_DefaultMaterial);
+        Object.DestroyImmediate(_BlitMaterial);
         _StandardMaterialMap.Clear();
         foreach (AccumulationData d in _AccumulationData.Values) {
             d._AccumulationTexture.Release();
@@ -132,23 +134,24 @@ public class PTRenderPipeline : RenderPipeline {
         return desc;
     }
     
-    public void RenderCamera(CommandBuffer cmd, Camera camera, RenderTargetIdentifier renderTarget, int w, int h) {
-        int albedo    = Shader.PropertyToID("_Albedo");
-        int positions = Shader.PropertyToID("_Positions");
-        cmd.GetTemporaryRT(albedo,    GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
-        cmd.GetTemporaryRT(positions, GetDescriptor(w, h, RenderTextureFormat.ARGBFloat));
+    public void RenderCamera(ScriptableRenderContext context, CommandBuffer cmd, Camera camera) {
+        int w = camera.pixelWidth;
+        int h = camera.pixelHeight;
+
+        int renderTarget = Shader.PropertyToID("_OutputImage");
+        int albedo       = Shader.PropertyToID("_Albedo");
+        int positions    = Shader.PropertyToID("_Positions");
+        cmd.GetTemporaryRT(renderTarget, GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
+        cmd.GetTemporaryRT(albedo,       GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
+        cmd.GetTemporaryRT(positions,    GetDescriptor(w, h, RenderTextureFormat.ARGBFloat));
 
         if (_PathReservoirsBuffers[0] == null || _PathReservoirsBuffers[0].count < w*h)
             for (int i = 0; i < 2; i++)
                 _PathReservoirsBuffers[i] = new ComputeBuffer(w*h, 80);
-        if (_DebugCounterBuffer == null)
-            _DebugCounterBuffer = new ComputeBuffer(16, 4);
-        
-        cmd.SetBufferData(_DebugCounterBuffer, Enumerable.Repeat(0, _DebugCounterBuffer.count).ToArray());
-
-        cmd.SetRayTracingShaderPass(_PathTracerShader, "PathTrace");
 
         int currentReservoirBuffer = 0;
+
+        cmd.SetRayTracingShaderPass(_PathTracerShader, "PathTrace");
 
         // sample canonical paths
         {
@@ -166,11 +169,9 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn" , _PathReservoirsBuffers[currentReservoirBuffer^1]);
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer]);
 
-            cmd.SetRayTracingBufferParam(_PathTracerShader, "_DebugCounters", _DebugCounterBuffer);
 
             cmd.DispatchRays(_PathTracerShader, "TracePaths", (uint)w, (uint)h, 1);
         }
-
 
         bool hasHistory = _AccumulationData.TryGetValue(camera, out AccumulationData accumData) &&
             accumData._AccumulationTexture && accumData._AccumulationTexture.width == w && accumData._AccumulationTexture.height == h;
@@ -194,7 +195,6 @@ public class PTRenderPipeline : RenderPipeline {
                 _AccumulationData.Remove(camera);
             _AccumulationData.Add(camera, accumData);
         }
-
 
         cmd.SetRayTracingFloatParam(_PathTracerShader, "_ReuseX",  _Asset._ReuseX);
         cmd.SetRayTracingFloatParam(_PathTracerShader, "_MCap", _Asset._MCap);
@@ -278,68 +278,72 @@ public class PTRenderPipeline : RenderPipeline {
         accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
         _AccumulationData[camera] = accumData;
         
+        cmd.SetGlobalTexture("_PositionsTex", positions);
+        cmd.Blit(renderTarget, BuiltinRenderTextureType.CameraTarget, _BlitMaterial);
+
         cmd.ReleaseTemporaryRT(albedo);
         cmd.ReleaseTemporaryRT(positions);
+        cmd.ReleaseTemporaryRT(renderTarget);
     }
 
     float lastCounterPrint = 0;
     protected override void Render(ScriptableRenderContext context, List<Camera> cameras) {
-        CommandBuffer cmd = new CommandBuffer();
-        bool focused = Application.isFocused;
         #if UNITY_EDITOR
-        focused = UnityEditor.EditorApplication.isFocused;
+        bool focused = UnityEditor.EditorApplication.isFocused;
+        #else
+        bool focused = Application.isFocused;
         #endif
-        if (focused) {
-            cmd.ClearRenderTarget(true, true, Color.black);
-            
-            if (BuildAccelerationStructure(cmd)) {            
-                cmd.SetRayTracingAccelerationStructure(_PathTracerShader, "_AccelerationStructure", _AccelerationStructure);
-                
-                _LightManager.BuildLightBuffer(cmd);
+        if (!focused) {
+            context.Submit();
+            return;
+        }
 
-                int outputRT = Shader.PropertyToID("_OutputImage");
-            
-                cmd.SetRayTracingIntParam(_PathTracerShader, "_Seed", _FrameIndex++);
+        CommandBuffer cmd = new CommandBuffer();
+        
+        foreach (Camera camera in cameras) {
+            cmd.SetViewMatrix(camera.worldToCameraMatrix);
+            cmd.SetProjectionMatrix(camera.projectionMatrix);
+            cmd.DrawRendererList(context.CreateSkyboxRendererList(camera, camera.projectionMatrix, camera.worldToCameraMatrix));
+        }
+        
+        if (BuildAccelerationStructure(cmd)) {
+            _LightManager.BuildLightBuffer(cmd);
 
-                foreach (Camera camera in cameras) {
-                    int w = camera.pixelWidth;
-                    int h = camera.pixelHeight;
-                    {
-                        RenderTextureDescriptor desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGBHalf, 0, 1, RenderTextureReadWrite.Linear);
-                        desc.enableRandomWrite = true;
-                        cmd.GetTemporaryRT(outputRT, desc);
-                    }
+            cmd.SetRayTracingAccelerationStructure(_PathTracerShader, "_AccelerationStructure", _AccelerationStructure);
+            cmd.SetRayTracingIntParam(_PathTracerShader, "_Seed", _FrameIndex++);
 
-                    RenderCamera(cmd, camera, outputRT, w, h);
-
-                    cmd.Blit(outputRT, BuiltinRenderTextureType.CameraTarget);
-                    cmd.ReleaseTemporaryRT(outputRT);
-                }
-            }
+            if (_DebugCounterBuffer == null)
+                _DebugCounterBuffer = new ComputeBuffer(16, 4);
+            cmd.SetBufferData(_DebugCounterBuffer, Enumerable.Repeat(0, _DebugCounterBuffer.count).ToArray());
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_DebugCounters", _DebugCounterBuffer);
+            foreach (Camera camera in cameras)
+                RenderCamera(context, cmd, camera);
         }
 
         context.ExecuteCommandBuffer(cmd);
+        cmd.Release();
 
         #if UNITY_EDITOR
+        float pixels = 0;
         foreach (Camera camera in cameras) {
             if (camera.cameraType == CameraType.SceneView && UnityEditor.Handles.ShouldRenderGizmos()) {
-                context.DrawUIOverlay(camera);
-                context.DrawWireOverlay(camera);
                 context.DrawGizmos(camera, GizmoSubset.PreImageEffects);
                 context.DrawGizmos(camera, GizmoSubset.PostImageEffects);
+                pixels += camera.pixelWidth*camera.pixelHeight;
             }
         }
-        if (_Asset._DebugCounters && Time.time - lastCounterPrint > 2) {
+        if (_Asset._DebugCounters && Time.time - lastCounterPrint > 1) {
             int[] counters = new int[_DebugCounterBuffer.count];
             _DebugCounterBuffer.GetData(counters);
             _Asset._DebugCounterText = "";
-            for (int i = 0; i < (int)DebugCounterType.NUM_DEBUG_COUNTERS; i++) {
-                _Asset._DebugCounterText += ((DebugCounterType)i).ToString().PadRight(20) + counters[i] + "\n";
-            }
+            _Asset._DebugCounterText += "Rays/pixel:   " + (counters[(int)DebugCounterType.RAYS          ]/pixels).ToString().PadRight(12);
+            _Asset._DebugCounterText += "(" + (int)(0.5f + 100f*counters[(int)DebugCounterType.SHADOW_RAYS    ]/counters[(int)DebugCounterType.RAYS          ]) + "% shadow)\n";
+            _Asset._DebugCounterText += "Shifts/pixel: " + (counters[(int)DebugCounterType.SHIFT_ATTEMPTS]/pixels).ToString().PadRight(12);
+            _Asset._DebugCounterText += "(" + (int)(0.5f + 100f*counters[(int)DebugCounterType.SHIFT_SUCCESSES]/counters[(int)DebugCounterType.SHIFT_ATTEMPTS]) + "% success)\n";
             lastCounterPrint = Time.time;
         }
         #endif
-
+    
         context.Submit();
     }
     

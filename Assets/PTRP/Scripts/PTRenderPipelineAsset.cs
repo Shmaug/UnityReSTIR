@@ -11,7 +11,7 @@ public class PTRenderPipelineAsset : RenderPipelineAsset {
     public uint _SpatialReusePasses = 2;
     public uint _SpatialReuseSamples = 1;
     public float _SpatialReuseRadius = 64;
-    public float _MCap = 30;
+    public float _MCap = 10;
 
     [Header("Accumulation")]
     public uint _TargetSampleCount = 0;
