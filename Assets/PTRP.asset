@@ -14,18 +14,18 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   _MaxBounces: 3
   _TemporalReuse: 1
-  _SpatialReusePasses: 2
+  _SpatialReusePasses: 1
   _SpatialReuseSamples: 1
   _SpatialReuseRadius: 64
   _MCap: 1
-  _TargetSampleCount: 1
+  _TargetSampleCount: 2
   _DepthReuseCutoff: 0.01
   _NormalReuseCutoff: 10
-  _DebugCounters: 1
-  _DebugCounterText: 'Rays/pixel:   0.125917    (100% shadow)
+  _DebugCounters: 0
+  _DebugCounterText: 'Rays/pixel:   816.7535    (105% shadow)
 
     Shifts/pixel:
-    2.881988E-06(-129392932% success)
+    0           (-2147483648% success)
 
 '
   _ReuseX: 0

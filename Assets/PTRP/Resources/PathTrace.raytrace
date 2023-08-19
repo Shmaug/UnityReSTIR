@@ -1,9 +1,9 @@
 #pragma max_recursion_depth 1
 
 #define SAMPLE_LIGHTS
-//#define RECONNECTION
 #define TALBOT_RMIS_TEMPORAL
 //#define TALBOT_RMIS_SPATIAL
+//#define RECONNECTION
 
 #include "PathGeneration.cginc"
 
@@ -47,7 +47,7 @@ void TracePaths() {
 }
 
 float _ReuseX;
-bool InScreen(uint2 p) { return all(p < _OutputExtent) && (_ReuseX == 0 || p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX); }
+bool InScreen(int2 p) { return all(p >= 0) && all(p < _OutputExtent) && (_ReuseX == 0 || p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX); }
 
 RWStructuredBuffer<PathReservoir> _PrevReservoirs;
 RWTexture2D<float4> _PrevPositions;
@@ -64,7 +64,7 @@ void TemporalReuse(uint2 id, inout PathReservoir r) {
         return;
     
     float4 prevClipPos = mul(_PrevWorldToClip, float4(vertex.xyz, 1));
-    uint2 prevPixel = ((prevClipPos.xy/prevClipPos.w)*.5 + .5) * _OutputExtent;
+    int2 prevPixel = ((prevClipPos.xy/prevClipPos.w)*.5 + .5) * (int2)_OutputExtent;
     if (!InScreen(prevPixel))
         return;
 
@@ -158,7 +158,7 @@ float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, f
     if (candidateIndex == -1)
         mi = msum;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
-        uint2 p = sg.Get(i);
+        int2 p = sg.Get(i);
         if (!InScreen(p))
             continue;
         float4 vp = _Positions[p];
@@ -192,7 +192,7 @@ float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, f
 float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
     float msum = centerM;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
-        uint2 p = sg.Get(i);
+        int2 p = sg.Get(i);
         if (!InScreen(p))
             continue;
         float4 vp = _Positions[p];
