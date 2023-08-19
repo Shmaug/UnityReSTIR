@@ -12,24 +12,25 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 73efe01495f02794898ebfcc97156d23, type: 3}
   m_Name: PTRP
   m_EditorClassIdentifier: 
-  _MaxBounces: 3
+  _MaxBounces: 2
+  _TemporalReuse: 1
   _SpatialReusePasses: 2
-  _SpatialReuseSamples: 2
+  _SpatialReuseSamples: 1
   _SpatialReuseRadius: 64
-  _MCap: 30
-  _TargetSampleCount: 4
+  _MCap: 4
+  _TargetSampleCount: 0
   _DepthReuseCutoff: 0.01
   _NormalReuseCutoff: 1
   _DebugCounters: 0
-  _DebugCounterText: 'RAYS                3975960
+  _DebugCounterText: 'RAYS                1048785716
 
-    SHADOW_RAYS         1204723
+    SHADOW_RAYS         1095158990
 
     SHIFT_ATTEMPTS     
-    880142
+    0
 
-    SHIFT_SUCCESSES     503551
+    SHIFT_SUCCESSES     -2960686
 
 '
-  _ReuseX: 0.25
+  _ReuseX: 0
   _PauseRendering: 0

@@ -1,0 +1,13 @@
+#pragma kernel CopyReservoirs
+
+#include "PathReservoir.cginc"
+
+RWStructuredBuffer<PathReservoir> _Src;
+RWStructuredBuffer<PathReservoir> _Dst;
+uint _Count;
+
+[numthreads(64, 1, 1)]
+void CopyReservoirs(uint3 id : SV_DispatchThreadID) {
+    if (id.x < _Count)
+        _Dst[id.x] = _Src[id.x];
+}

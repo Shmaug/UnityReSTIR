@@ -1,9 +1,9 @@
 #ifndef PATH_RESERVOIR_H
 #define PATH_RESERVOIR_H
 
-#include "Utils.cginc"
 #include "Random.cginc"
 
+// 32 bytes
 struct ReconnectionVertex {
     uint2 _PackedRadiance;
     float _G;
@@ -37,11 +37,13 @@ ReconnectionVertex MakeReconnectionVertex() {
     return r;
 }
 
+// 64 bytes
 struct PathSample {
     float3 _Radiance;
     float _PdfW;
     RandomSampler _RngSeed;
     uint _Bounces;
+    uint pad;
     #ifdef RECONNECTION
     ReconnectionVertex _ReconnectionVertex;
     #endif
@@ -57,6 +59,7 @@ PathSample MakeSample(float3 radiance, float pdfW, uint bounces, RandomSampler s
     #endif
     return r;
 }
+// 80 bytes
 struct PathReservoir {
     PathSample _Sample;
     float _W;
@@ -92,7 +95,7 @@ PathReservoir MakeReservoir() {
     PathReservoir r = {
         0, 0, 0, 0,
         0, 0, 0, 0,
-        0, 0, 0,
+        0, 0, 0, 0,
     #ifdef RECONNECTION
         0, 0, 0, 0,
         0, 0, 0, 0

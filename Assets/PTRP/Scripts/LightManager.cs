@@ -7,6 +7,7 @@ using System.Collections.ObjectModel;
 
 public class LightManager {
     ComputeBuffer _LightBuffer = null;
+    int _LightCount = 0;
 
     public void Release() {
         _LightBuffer?.Release();
@@ -23,7 +24,7 @@ public class LightManager {
         public float pad1;
     };
 
-    public void BuildLightBuffer(CommandBuffer cmd, params RayTracingShader[] shaders) {
+    public void BuildLightBuffer(CommandBuffer cmd) {
         List<GpuLight> lights = new List<GpuLight>();
         foreach (Light light in Object.FindObjectsByType<Light>(FindObjectsSortMode.None)) {
             if (!light.isActiveAndEnabled) continue;
@@ -48,10 +49,14 @@ public class LightManager {
         }
 
         cmd.SetBufferData(_LightBuffer, lights.ToArray());
-        
-        foreach (var shader in shaders) {
-            cmd.SetRayTracingBufferParam(shader, "_Lights", _LightBuffer);
-            cmd.SetRayTracingIntParam(shader, "_LightCount", lights.Count);
-        }
+        _LightCount = lights.Count;
+    }
+    public void SetShaderParams(CommandBuffer cmd, RayTracingShader shader) {        
+        cmd.SetRayTracingBufferParam(shader, "_Lights", _LightBuffer);
+        cmd.SetRayTracingIntParam(shader, "_LightCount", _LightCount);
+    }
+    public void SetShaderParams(CommandBuffer cmd, ComputeShader shader, int kernelIndex) {        
+        cmd.SetComputeBufferParam(shader, kernelIndex, "_Lights", _LightBuffer);
+        cmd.SetComputeIntParam(shader, "_LightCount", _LightCount);
     }
 }

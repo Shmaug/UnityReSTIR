@@ -46,7 +46,7 @@ Shader "Path Tracing/Opaque"
 			void ClosestHit(inout ShadingData sd : SV_RayPayload, AttributeData attributeData : SV_IntersectionAttributes) {
 				IntersectionVertex v;
 				GetCurrentIntersectionVertex(attributeData, v, ObjectToWorld3x4());
-
+				
 				sd._Position = v.position;
 				sd.GeometryNormal(v.geometryNormal);
 				sd.ShadingNormal(v.normal);

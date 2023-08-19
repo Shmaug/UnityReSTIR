@@ -9,6 +9,7 @@ struct AccumulationData {
     public RenderTexture _AccumulationTexture;
     public RenderTexture _PositionsTexture;
     public Matrix4x4 _WorldToClip;
+    public ComputeBuffer _Reservoirs;
 };
 
 enum DebugCounterType {
@@ -25,6 +26,7 @@ public class PTRenderPipeline : RenderPipeline {
     PTRenderPipelineAsset _Asset;
 
     RayTracingShader _PathTracerShader;
+    ComputeShader _CopyReservoirsShader;
     ComputeShader _AccumulateShader;
     Material _DefaultMaterial;
     
@@ -41,6 +43,7 @@ public class PTRenderPipeline : RenderPipeline {
     public PTRenderPipeline(PTRenderPipelineAsset asset) {
         _Asset = asset;
         _PathTracerShader = Resources.Load<RayTracingShader>("PathTrace");
+        _CopyReservoirsShader = Resources.Load<ComputeShader>("CopyReservoirs");
         _AccumulateShader = Resources.Load<ComputeShader>("Accumulate");
         _DefaultMaterial = new Material(Resources.Load<Shader>("Opaque"));
         _LightManager = new LightManager();
@@ -48,9 +51,10 @@ public class PTRenderPipeline : RenderPipeline {
     protected override void Dispose(bool disposing) {
         Object.DestroyImmediate(_DefaultMaterial);
         _StandardMaterialMap.Clear();
-        foreach (AccumulationData tex in _AccumulationData.Values) {
-            tex._AccumulationTexture.Release();
-            tex._PositionsTexture.Release();
+        foreach (AccumulationData d in _AccumulationData.Values) {
+            d._AccumulationTexture.Release();
+            d._PositionsTexture.Release();
+            d._Reservoirs?.Dispose();
         }
         _AccumulationData.Clear();
         _AccelerationStructure?.Dispose();
@@ -127,80 +131,115 @@ public class PTRenderPipeline : RenderPipeline {
         desc.enableRandomWrite = true;
         return desc;
     }
-
+    
     public void RenderCamera(CommandBuffer cmd, Camera camera, RenderTargetIdentifier renderTarget, int w, int h) {
         int albedo    = Shader.PropertyToID("_Albedo");
         int positions = Shader.PropertyToID("_Positions");
         cmd.GetTemporaryRT(albedo,    GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
         cmd.GetTemporaryRT(positions, GetDescriptor(w, h, RenderTextureFormat.ARGBFloat));
 
-        for (int i = 0; i < 2; i++)
-            if (_PathReservoirsBuffers[i] == null || _PathReservoirsBuffers[i].count < w*h)
+        if (_PathReservoirsBuffers[0] == null || _PathReservoirsBuffers[0].count < w*h)
+            for (int i = 0; i < 2; i++)
                 _PathReservoirsBuffers[i] = new ComputeBuffer(w*h, 80);
-
         if (_DebugCounterBuffer == null)
             _DebugCounterBuffer = new ComputeBuffer(16, 4);
-
+        
         cmd.SetBufferData(_DebugCounterBuffer, Enumerable.Repeat(0, _DebugCounterBuffer.count).ToArray());
 
-        // Render
+        cmd.SetRayTracingShaderPass(_PathTracerShader, "PathTrace");
+
+        int currentReservoirBuffer = 0;
+
+        // sample canonical paths
         {
-            cmd.SetRayTracingShaderPass(_PathTracerShader, "PathTrace");
+            _LightManager.SetShaderParams(cmd, _PathTracerShader);
+
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Radiance", renderTarget);
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Albedo", albedo);
             cmd.SetRayTracingTextureParam(_PathTracerShader, "_Positions", positions);
             cmd.SetRayTracingIntParams(_PathTracerShader, "_OutputExtent", new int[]{ w, h });
             cmd.SetRayTracingIntParam(_PathTracerShader, "_MaxBounces", (int)_Asset._MaxBounces);
             
-            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[0]);
-            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn", _PathReservoirsBuffers[1]);
-
             cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraToWorld",           camera.cameraToWorldMatrix);
             cmd.SetRayTracingMatrixParam(_PathTracerShader, "_CameraInverseProjection", camera.nonJitteredProjectionMatrix.inverse);
+
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn" , _PathReservoirsBuffers[currentReservoirBuffer^1]);
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer]);
 
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_DebugCounters", _DebugCounterBuffer);
 
             cmd.DispatchRays(_PathTracerShader, "TracePaths", (uint)w, (uint)h, 1);
         }
 
+
+        bool hasHistory = _AccumulationData.TryGetValue(camera, out AccumulationData accumData) &&
+            accumData._AccumulationTexture && accumData._AccumulationTexture.width == w && accumData._AccumulationTexture.height == h;
+        if (!hasHistory) {            
+            if (accumData._AccumulationTexture) {
+                Object.DestroyImmediate(accumData._AccumulationTexture);
+                Object.DestroyImmediate(accumData._PositionsTexture);
+            }
+            accumData._AccumulationTexture = new RenderTexture(GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
+            accumData._PositionsTexture    = new RenderTexture(GetDescriptor(w, h, RenderTextureFormat.ARGBFloat));
+            accumData._AccumulationTexture.Create();
+            accumData._PositionsTexture.Create();
+
+            if (accumData._Reservoirs != null)
+                accumData._Reservoirs.Dispose();
+            accumData._Reservoirs = new ComputeBuffer(w*h, _PathReservoirsBuffers[0].stride);
+
+            accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
+
+            if (_AccumulationData.ContainsKey(camera))
+                _AccumulationData.Remove(camera);
+            _AccumulationData.Add(camera, accumData);
+        }
+
+
+        cmd.SetRayTracingFloatParam(_PathTracerShader, "_ReuseX",  _Asset._ReuseX);
+        cmd.SetRayTracingFloatParam(_PathTracerShader, "_MCap", _Asset._MCap);
+
+        // temporal reuse
+        if (_Asset._TemporalReuse && hasHistory) {
+            cmd.SetRayTracingBufferParam (_PathTracerShader, "_PrevReservoirs",  accumData._Reservoirs);
+            cmd.SetRayTracingTextureParam(_PathTracerShader, "_PrevPositions",   accumData._PositionsTexture);
+            cmd.SetRayTracingMatrixParam (_PathTracerShader, "_PrevWorldToClip", accumData._WorldToClip);
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn",  _PathReservoirsBuffers[currentReservoirBuffer]);
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer^1]);
+            cmd.DispatchRays(_PathTracerShader, "TemporalReuse", (uint)w, (uint)h, 1);
+            currentReservoirBuffer ^= 1;
+        }
+
         // spatial reuse
         if (_Asset._SpatialReusePasses > 0) {
+            _LightManager.SetShaderParams(cmd, _PathTracerShader);
+            cmd.SetRayTracingBufferParam(_PathTracerShader, "_DebugCounters", _DebugCounterBuffer);
             cmd.SetRayTracingIntParam(_PathTracerShader, "_SpatialReuseSamples", (int)_Asset._SpatialReuseSamples);
-            cmd.SetRayTracingFloatParam(_PathTracerShader, "_ReuseX",  _Asset._ReuseX);
             cmd.SetRayTracingFloatParam(_PathTracerShader, "_SpatialReuseRadius",  _Asset._SpatialReuseRadius);
-            cmd.SetRayTracingFloatParam(_PathTracerShader, "_MCap", _Asset._MCap);
-            for (int i = 0; i < _Asset._SpatialReusePasses; i++)
-            {
-                cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[1 - (i%2)]);
-                cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn",  _PathReservoirsBuffers[i%2]);
+            for (int i = 0; i < _Asset._SpatialReusePasses; i++) {
+                cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn",  _PathReservoirsBuffers[currentReservoirBuffer]);
+                cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer^1]);
+                currentReservoirBuffer ^= 1;
                 cmd.SetRayTracingIntParam(_PathTracerShader, "_SpatialReuseIteration", i);
                 cmd.DispatchRays(_PathTracerShader, "SpatialReuse", (uint)w, (uint)h, 1);
             }
         }
+        
+        // copy final reservoirs for future reuse
+        if (_Asset._TemporalReuse) {
+            cmd.SetComputeBufferParam(_CopyReservoirsShader, 0, "_Src", _PathReservoirsBuffers[currentReservoirBuffer]);
+            cmd.SetComputeBufferParam(_CopyReservoirsShader, 0, "_Dst", accumData._Reservoirs);
+            cmd.SetComputeIntParam(_CopyReservoirsShader, "_Count", w*h);
+            _CopyReservoirsShader.GetKernelThreadGroupSizes(0, out uint kw, out uint _, out _);
+            cmd.DispatchCompute(_CopyReservoirsShader, 0, (w*h + (int)kw-1)/(int)kw, 1, 1);
+        }
 
         // Accumulate/denoise
-        int accumKernel = _AccumulateShader.FindKernel("Accumulate");
-        if (_AccumulateShader.IsSupported(accumKernel)) {
-            bool hasHistory = true;
-            if (!_AccumulationData.TryGetValue(camera, out AccumulationData accumData) || !accumData._AccumulationTexture ||
-                accumData._AccumulationTexture.width != w || accumData._AccumulationTexture.height != h) {
-                if (accumData._AccumulationTexture) {
-                    Object.DestroyImmediate(accumData._AccumulationTexture);
-                    Object.DestroyImmediate(accumData._PositionsTexture);
-                }
-                accumData._AccumulationTexture = new RenderTexture(GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
-                accumData._PositionsTexture    = new RenderTexture(GetDescriptor(w, h, RenderTextureFormat.ARGBFloat));
-                accumData._AccumulationTexture.Create();
-                accumData._PositionsTexture.Create();
-                accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
-                if (_AccumulationData.ContainsKey(camera))
-                    _AccumulationData.Remove(camera);
-                _AccumulationData.Add(camera, accumData);
-                hasHistory = false;
-            }
-
+        {
             int accum = Shader.PropertyToID("_Accumulated");
             cmd.GetTemporaryRT(accum, GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
+            
+            int accumKernel = _AccumulateShader.FindKernel("Accumulate");
 
             cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_Radiance",             renderTarget);
             cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_Albedo",               albedo);
@@ -221,11 +260,12 @@ public class PTRenderPipeline : RenderPipeline {
                     
             cmd.CopyTexture(accum, accumData._AccumulationTexture);
             cmd.CopyTexture(positions, accumData._PositionsTexture);
-            accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
-            _AccumulationData[camera] = accumData;
 
             cmd.ReleaseTemporaryRT(accum);
         }
+
+        accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
+        _AccumulationData[camera] = accumData;
         
         cmd.ReleaseTemporaryRT(albedo);
         cmd.ReleaseTemporaryRT(positions);
@@ -242,7 +282,7 @@ public class PTRenderPipeline : RenderPipeline {
             if (BuildAccelerationStructure(cmd)) {            
                 cmd.SetRayTracingAccelerationStructure(_PathTracerShader, "_AccelerationStructure", _AccelerationStructure);
                 
-                _LightManager.BuildLightBuffer(cmd, _PathTracerShader);
+                _LightManager.BuildLightBuffer(cmd);
 
                 int outputRT = Shader.PropertyToID("_OutputImage");
             

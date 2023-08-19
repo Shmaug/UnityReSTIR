@@ -7,8 +7,9 @@ public class PTRenderPipelineAsset : RenderPipelineAsset {
     public uint _MaxBounces = 2;
 
     [Header("ReSTIR")]
+    public bool _TemporalReuse = false;
     public uint _SpatialReusePasses = 2;
-    public uint _SpatialReuseSamples = 5;
+    public uint _SpatialReuseSamples = 1;
     public float _SpatialReuseRadius = 64;
     public float _MCap = 30;
 

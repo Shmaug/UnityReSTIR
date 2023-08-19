@@ -45,8 +45,82 @@ void TracePaths() {
     _Radiance[id] = float4(sd.Emission() + r._Sample._Radiance * r._W, 1);
 }
 
+float _ReuseX;
+bool InScreen(uint2 p) { return all(p < _OutputExtent) && (_ReuseX == 0 || p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX); }
 
-struct SampleLocations {
+RWStructuredBuffer<PathReservoir> _PrevReservoirs;
+RWTexture2D<float4> _PrevPositions;
+float4x4 _PrevWorldToClip;
+
+[shader("raygeneration")]
+void TemporalReuse() {
+    uint2 id = DispatchRaysIndex().xy;
+    if (any(id >= _OutputExtent)) return;
+
+    if (!InScreen(id)) return;
+    
+    float4 vertex = _Positions[id];
+    if (!all(isfinite(vertex.xyz)))
+        return;
+        
+    float4 prevClipPos = mul(_PrevWorldToClip, float4(vertex.xyz, 1));
+    uint2 prevPixel = ((prevClipPos.xy/prevClipPos.w)*.5 + .5) * _OutputExtent;
+    if (!InScreen(prevPixel))
+        return;
+
+    float4 prevVertex = _PrevPositions[prevPixel];
+    if (!all(isfinite(prevVertex.xyz)))
+        return;
+        
+    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
+
+    float3 emission = _Radiance[id].rgb - (r._Sample._Radiance * r._W);
+
+    RandomSampler rng = MakeRandomSampler(_Seed, id, 1000);
+
+    {
+        PathReservoir candidate = _PrevReservoirs[prevPixel.y*_OutputExtent.x + prevPixel.x];
+        if (!(candidate._M > 0))
+            return;
+        if (candidate._W > 0) {
+            float candidateM = candidate._M * Luminance(candidate._Sample._Radiance);
+            
+            float jacobianToHere;
+            candidate._Sample = ShiftTo(candidate._Sample, vertex, jacobianToHere);
+
+            float jacobianToThere;
+            PathSample s = ShiftTo(r._Sample, prevVertex, jacobianToThere);
+            /*
+            if (jacobianToHere > 0) {
+                candidateM /= jacobianToHere;
+                candidateM /= candidateM + Luminance(candidate._Sample._Radiance)*r._M;
+                candidate.PrepareMerge(candidateM, jacobianToHere);
+            } else
+                candidate._W = 0;
+
+            float myM = r._M * Luminance(r._Sample._Radiance);
+            myM /= myM + candidate._M*Luminance(s._Radiance)*jacobianToThere;
+            r.PrepareMerge(myM);
+            /*/
+            r.PrepareMerge(jacobianToThere > 0 ? r._M / (r._M + candidate._M) : 1);
+            candidate.PrepareMerge(candidate._M / (r._M + candidate._M), jacobianToHere);
+            //*/
+
+            r.Merge(rng.NextFloat().x, candidate);
+
+            r.FinalizeMerge();
+        } else
+            r._M += candidate._M;
+    }
+
+    r._M = min(r._M, _MCap);
+    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
+
+    _Radiance[id] = float4(emission + r._Sample._Radiance * r._W, 1);
+}
+
+
+struct SpatialSampleLocations {
     RandomSampler _RngSeed;
     int2 _Center;
 
@@ -56,19 +130,16 @@ struct SampleLocations {
         return _Center + int2(SampleConcentricDisc(tmp.NextFloat().xy) * _SpatialReuseRadius);
     }
 };
-SampleLocations MakeSampleLocations(inout RandomSampler rng, int2 center) {
-    SampleLocations sg;
+SpatialSampleLocations MakeSpatialSampleLocations(inout RandomSampler rng, int2 center) {
+    SpatialSampleLocations sg;
     sg._RngSeed = rng;
     sg._Center = center;
     rng.SkipNext(_SpatialReuseSamples);
     return sg;
 }
 
-float _ReuseX;
-bool InScreen(uint2 p) { return all(p < _OutputExtent) && p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX; }
-
 #ifdef TALBOT_RMIS
-float ComputeMisWeight(SampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
+float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
     float mi = 0;
     float msum = centerM * Luminance(sample._Sample._Radiance) * jacobianToCenter;
     if (candidateIndex == -1)
@@ -98,14 +169,14 @@ float ComputeMisWeight(SampleLocations sg, PathReservoir sample, float jacobianT
     }
     return msum > 0 ? mi/msum : 0;
 }
-float FinalizeMisWeight(SampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
+float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
     return 1;
 }
 #else
-float ComputeMisWeight(SampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
+float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float jacobianToCenter, float centerM, int candidateIndex) {
     return sample._M;
 }
-float FinalizeMisWeight(SampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
+float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, float centerM, int selectedIndex) {
     float msum = centerM;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         uint2 p = sg.Get(i);
@@ -151,13 +222,13 @@ void SpatialReuse() {
 
     float3 emission = _Radiance[id].rgb - (r._Sample._Radiance * r._W);
 
-    RandomSampler rng = MakeRandomSampler(_Seed, id, (1+_SpatialReuseIteration)*_MaxBounces*100);
-    SampleLocations sg = MakeSampleLocations(rng, id);
+    RandomSampler rng = MakeRandomSampler(_Seed, id, (2+_SpatialReuseIteration)*1000);
+    SpatialSampleLocations sg = MakeSpatialSampleLocations(rng, id);
 
     int selectedIndex = -1;
 
     float centerM = r._M;
-    r.PrepareMerge(ComputeMisWeight(sg, r, 1, centerM, -1));
+    r.PrepareMerge(ComputeSpatialMisWeight(sg, r, 1, centerM, -1));
 
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         int2 p = sg.Get(i);
@@ -184,14 +255,14 @@ void SpatialReuse() {
             continue;
         }
         
-        candidate.PrepareMerge(ComputeMisWeight(sg, candidate, jacobian, centerM, i), jacobian);
+        candidate.PrepareMerge(ComputeSpatialMisWeight(sg, candidate, jacobian, centerM, i), jacobian);
     
         if (r.Merge(rng.NextFloat().x, candidate))
             selectedIndex = i;
     }
     
     if (r._W > 0) {
-        r._W *= FinalizeMisWeight(sg, r, centerM, selectedIndex);
+        r._W *= FinalizeSpatialMisWeight(sg, r, centerM, selectedIndex);
         r.FinalizeMerge();
     }
     
