@@ -7,8 +7,9 @@ using Unity.Mathematics;
 struct AccumulationData {
     public RenderTexture _AccumulationTexture;
     public RenderTexture _PositionsTexture;
-    public Matrix4x4 _WorldToClip;
     public ComputeBuffer _Reservoirs;
+    public Matrix4x4 _WorldToClip;
+    public Vector3 _CameraPos;
 };
 
 enum DebugCounterType {
@@ -27,7 +28,7 @@ public class PTRenderPipeline : RenderPipeline {
     RayTracingShader _PathTracerShader;
     ComputeShader _CopyReservoirsShader;
     ComputeShader _AccumulateShader;
-    Material _DefaultMaterial;
+    Material _StandardMaterial;
     Material _BlitMaterial;
     
     Dictionary<Material, MaterialPropertyBlock> _StandardMaterialMap = new Dictionary<Material, MaterialPropertyBlock>();
@@ -42,15 +43,15 @@ public class PTRenderPipeline : RenderPipeline {
 
     public PTRenderPipeline(PTRenderPipelineAsset asset) {
         _Asset = asset;
-        _PathTracerShader = Resources.Load<RayTracingShader>("PathTrace");
-        _CopyReservoirsShader = Resources.Load<ComputeShader>("CopyReservoirs");
-        _AccumulateShader = Resources.Load<ComputeShader>("Accumulate");
-        _DefaultMaterial = new Material(Resources.Load<Shader>("Opaque"));
-        _BlitMaterial = new Material(Resources.Load<Shader>("BlitResult"));
+        _PathTracerShader = Resources.Load<RayTracingShader>("Shaders/PathTrace");
+        _CopyReservoirsShader = Resources.Load<ComputeShader>("Shaders/CopyReservoirs");
+        _AccumulateShader = Resources.Load<ComputeShader>("Shaders/Accumulate");
+        _StandardMaterial = new Material(Resources.Load<Shader>("Shaders/StandardPT"));
+        _BlitMaterial = new Material(Resources.Load<Shader>("Shaders/BlitResult"));
         _LightManager = new LightManager();
     }
     protected override void Dispose(bool disposing) {
-        Object.DestroyImmediate(_DefaultMaterial);
+        Object.DestroyImmediate(_StandardMaterial);
         Object.DestroyImmediate(_BlitMaterial);
         _StandardMaterialMap.Clear();
         foreach (AccumulationData d in _AccumulationData.Values) {
@@ -81,7 +82,7 @@ public class PTRenderPipeline : RenderPipeline {
                 bool isOpaque = m.renderQueue < (int)RenderQueue.AlphaTest;
 
                 if (m.shader.name == "Standard") {
-                    RayTracingMeshInstanceConfig cfg = new RayTracingMeshInstanceConfig(mf.sharedMesh, i, _DefaultMaterial);
+                    RayTracingMeshInstanceConfig cfg = new RayTracingMeshInstanceConfig(mf.sharedMesh, i, _StandardMaterial);
                     cfg.accelerationStructureBuildFlags = renderer.rayTracingAccelerationStructureBuildFlags;
                     cfg.accelerationStructureBuildFlagsOverride = renderer.rayTracingAccelerationStructureBuildFlagsOverride;
                     cfg.mask = 0xFF;
@@ -190,6 +191,7 @@ public class PTRenderPipeline : RenderPipeline {
             accumData._Reservoirs = new ComputeBuffer(w*h, _PathReservoirsBuffers[0].stride);
 
             accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
+            accumData._CameraPos = camera.transform.position;
 
             if (_AccumulationData.ContainsKey(camera))
                 _AccumulationData.Remove(camera);
@@ -206,6 +208,7 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetRayTracingMatrixParam (_PathTracerShader, "_PrevWorldToClip", accumData._WorldToClip);
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsIn",  _PathReservoirsBuffers[currentReservoirBuffer]);
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer^1]);
+            cmd.SetRayTracingVectorParam(_PathTracerShader, "_PrevCameraPos", accumData._CameraPos);
             cmd.DispatchRays(_PathTracerShader, "TemporalReuse", (uint)w, (uint)h, 1);
             currentReservoirBuffer ^= 1;
         }
@@ -247,35 +250,55 @@ public class PTRenderPipeline : RenderPipeline {
 
         // Accumulate/denoise
         {
-            int accum = Shader.PropertyToID("_Accumulated");
-            cmd.GetTemporaryRT(accum, GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
-            
-            int accumKernel = _AccumulateShader.FindKernel("Accumulate");
+            // demodulate albedo
+            {
+                int demodulateKernel = _AccumulateShader.FindKernel("Demodulate");
+                cmd.SetComputeTextureParam(_AccumulateShader, demodulateKernel, "_Radiance", renderTarget);
+                cmd.SetComputeTextureParam(_AccumulateShader, demodulateKernel, "_Albedo",   albedo);
+                cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", w, h);
+                _AccumulateShader.GetKernelThreadGroupSizes(demodulateKernel, out uint kw, out uint kh, out _);
+                cmd.DispatchCompute(_AccumulateShader, demodulateKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
+            }
+            {
+                int accum = Shader.PropertyToID("_Accumulated");
+                cmd.GetTemporaryRT(accum, GetDescriptor(w, h, RenderTextureFormat.ARGBHalf));
+                
+                int reprojectKernel = _AccumulateShader.FindKernel("Reproject");
 
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_Radiance",             renderTarget);
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_Albedo",               albedo);
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_Positions",            positions);
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_AccumulatedColor",     accum);
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevAccumulatedColor", accumData._AccumulationTexture);
-            cmd.SetComputeTextureParam(_AccumulateShader, accumKernel, "_PrevPositions",        accumData._PositionsTexture);
-            cmd.SetComputeBufferParam (_AccumulateShader, accumKernel, "_DebugCounters", _DebugCounterBuffer);
-            cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", w, h);
-            cmd.SetComputeMatrixParam (_AccumulateShader, "_PrevWorldToClip", accumData._WorldToClip);
-            cmd.SetComputeIntParams   (_AccumulateShader, "_Clear", hasHistory ? 0 : 1);
-            cmd.SetComputeIntParams   (_AccumulateShader, "_MaxSamples", (int)_Asset._TargetSampleCount);
-            cmd.SetComputeFloatParam  (_AccumulateShader, "_DepthReuseCutoff", _Asset._DepthReuseCutoff);
-            cmd.SetComputeFloatParam  (_AccumulateShader, "_NormalReuseCutoff", Mathf.Cos(_Asset._NormalReuseCutoff*Mathf.Deg2Rad));
-            
-            _AccumulateShader.GetKernelThreadGroupSizes(accumKernel, out uint kw, out uint kh, out _);
-            cmd.DispatchCompute(_AccumulateShader, accumKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
-                    
-            cmd.CopyTexture(accum, accumData._AccumulationTexture);
-            cmd.CopyTexture(positions, accumData._PositionsTexture);
+                cmd.SetComputeTextureParam(_AccumulateShader, reprojectKernel, "_Radiance",             renderTarget);
+                cmd.SetComputeTextureParam(_AccumulateShader, reprojectKernel, "_Positions",            positions);
+                cmd.SetComputeTextureParam(_AccumulateShader, reprojectKernel, "_AccumulatedColor",     accum);
+                cmd.SetComputeTextureParam(_AccumulateShader, reprojectKernel, "_PrevAccumulatedColor", accumData._AccumulationTexture);
+                cmd.SetComputeTextureParam(_AccumulateShader, reprojectKernel, "_PrevPositions",        accumData._PositionsTexture);
+                cmd.SetComputeBufferParam (_AccumulateShader, reprojectKernel, "_DebugCounters", _DebugCounterBuffer);
+                cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", w, h);
+                cmd.SetComputeMatrixParam (_AccumulateShader, "_PrevWorldToClip", accumData._WorldToClip);
+                cmd.SetComputeIntParams   (_AccumulateShader, "_Clear", hasHistory ? 0 : 1);
+                cmd.SetComputeIntParams   (_AccumulateShader, "_MaxSamples", (int)_Asset._TargetSampleCount);
+                cmd.SetComputeFloatParam  (_AccumulateShader, "_DepthReuseCutoff", _Asset._DepthReuseCutoff);
+                cmd.SetComputeFloatParam  (_AccumulateShader, "_NormalReuseCutoff", Mathf.Cos(_Asset._NormalReuseCutoff*Mathf.Deg2Rad));
+                
+                _AccumulateShader.GetKernelThreadGroupSizes(reprojectKernel, out uint kw, out uint kh, out _);
+                cmd.DispatchCompute(_AccumulateShader, reprojectKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
+                        
+                cmd.CopyTexture(accum, accumData._AccumulationTexture);
+                cmd.CopyTexture(positions, accumData._PositionsTexture);
 
-            cmd.ReleaseTemporaryRT(accum);
+                cmd.ReleaseTemporaryRT(accum);
+            }
+            // modulate albedo
+            {
+                int modulateKernel = _AccumulateShader.FindKernel("Modulate");
+                cmd.SetComputeTextureParam(_AccumulateShader, modulateKernel, "_Radiance", renderTarget);
+                cmd.SetComputeTextureParam(_AccumulateShader, modulateKernel, "_Albedo",   albedo);
+                cmd.SetComputeIntParams   (_AccumulateShader, "_OutputExtent", w, h);
+                _AccumulateShader.GetKernelThreadGroupSizes(modulateKernel, out uint kw, out uint kh, out _);
+                cmd.DispatchCompute(_AccumulateShader, modulateKernel, (w + (int)kw-1)/(int)kw, (h + (int)kh-1)/(int)kh, 1);
+            }
         }
 
         accumData._WorldToClip = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
+        accumData._CameraPos = camera.transform.position;
         _AccumulationData[camera] = accumData;
         
         cmd.SetGlobalTexture("_PositionsTex", positions);
@@ -289,14 +312,11 @@ public class PTRenderPipeline : RenderPipeline {
     float lastCounterPrint = 0;
     protected override void Render(ScriptableRenderContext context, List<Camera> cameras) {
         #if UNITY_EDITOR
-        bool focused = UnityEditor.EditorApplication.isFocused;
-        #else
-        bool focused = Application.isFocused;
-        #endif
-        if (!focused) {
+        if (!UnityEditor.EditorApplication.isPlaying && !UnityEditor.EditorApplication.isFocused) {
             context.Submit();
             return;
         }
+        #endif
 
         CommandBuffer cmd = new CommandBuffer();
         

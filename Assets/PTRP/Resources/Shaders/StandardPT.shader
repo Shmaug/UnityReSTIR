@@ -1,4 +1,4 @@
-Shader "Path Tracing/Opaque"
+Shader "Path Tracing/Standard"
 {
 	Properties
 	{
@@ -36,11 +36,25 @@ Shader "Path Tracing/Opaque"
 			HLSLPROGRAM
 
 			#pragma raytracing surface_shader
-
+			
 			#include "MaterialInput.cginc"
 			
 			#include "IntersectionVertex.cginc"
 			#include "ShadingData.cginc"
+
+			[shader("anyhit")]
+			void AnyHit(inout ShadingData sd : SV_RayPayload, AttributeData attributeData : SV_IntersectionAttributes) {
+				#if defined(_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A)
+					if (_Color.a < _Cutoff)
+						IgnoreHit();
+				#else
+					IntersectionVertex v;
+					GetCurrentIntersectionVertex(attributeData, v, ObjectToWorld3x4());
+					float2 uv = TRANSFORM_TEX(v.texCoords[0], _MainTex);
+					if (_MainTex.SampleLevel(sampler_MainTex, uv, 0).a * _Color.a < _Cutoff)
+						IgnoreHit();
+				#endif
+			}
 
 			[shader("closesthit")]
 			void ClosestHit(inout ShadingData sd : SV_RayPayload, AttributeData attributeData : SV_IntersectionAttributes) {
@@ -51,11 +65,17 @@ Shader "Path Tracing/Opaque"
 				sd.GeometryNormal(v.geometryNormal);
 				sd.ShadingNormal(v.normal);
 				sd.Tangent(v.tangent);
-				
+
 				float2 uv = TRANSFORM_TEX(v.texCoords[0], _MainTex);
 
+				//float3 bump = UnpackScaleNormal(tex2D(_BumpMap, uv), _BumpScale);
+			
+				//float2 mg;
+				//mg.r = _MetallicGlossMap.SampleLevel(sampler_MetallicGlossMap, uv, 0)).r;
+				//mg.g = 1.0f - _SpecGlossMap.SampleLevel(sampler_SpecGlossMap, uv, 0)).r;
+
 				sd.BaseColor(_Color * _MainTex.SampleLevel(sampler_MainTex, uv, 0).rgb);
-				sd.Emission(_EmissionColor * _EmissionMap.SampleLevel(sampler_EmissionMap, uv, 0).rgb);
+				sd.Emission(_EmissionMap.SampleLevel(sampler_EmissionMap, uv, 0).rgb * _EmissionColor.rgb);
 				sd.Specular      (0.5);
 				sd.SpecularTint  (0.5);
 				sd.Sheen         (0.5);

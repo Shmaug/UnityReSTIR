@@ -1,7 +1,7 @@
 #pragma kernel CopyReservoirs
 #pragma kernel OutputRadiance
 
-#include "PathReservoir.cginc"
+#include "../PathReservoir.cginc"
 
 RWStructuredBuffer<PathReservoir> _Src;
 RWStructuredBuffer<PathReservoir> _Dst;

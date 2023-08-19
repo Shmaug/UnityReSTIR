@@ -5,7 +5,7 @@
 //#define TALBOT_RMIS_SPATIAL
 //#define RECONNECTION
 
-#include "PathGeneration.cginc"
+#include "../PathGeneration.cginc"
 
 RWStructuredBuffer<PathReservoir> _PathReservoirsIn;
 RWStructuredBuffer<PathReservoir> _PathReservoirsOut;
@@ -52,6 +52,7 @@ bool InScreen(int2 p) { return all(p >= 0) && all(p < _OutputExtent) && (_ReuseX
 RWStructuredBuffer<PathReservoir> _PrevReservoirs;
 RWTexture2D<float4> _PrevPositions;
 float4x4 _PrevWorldToClip;
+float3 _PrevCameraPos;
 
 float Mis(float a, float b) { return a / (a + b); }
 
@@ -159,7 +160,7 @@ float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, f
         mi = msum;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         int2 p = sg.Get(i);
-        if (!InScreen(p))
+        if (!InScreen(p) || all(p == sg._Center))
             continue;
         float4 vp = _Positions[p];
         if (!all(isfinite(vp.xyz)))
@@ -193,7 +194,7 @@ float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, 
     float msum = centerM;
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         int2 p = sg.Get(i);
-        if (!InScreen(p))
+        if (!InScreen(p) || all(p == sg._Center))
             continue;
         float4 vp = _Positions[p];
         if (!all(isfinite(vp.xyz)))
@@ -238,7 +239,7 @@ void SpatialReuse(uint2 id, inout PathReservoir r) {
 
     for (uint i = 0; i < _SpatialReuseSamples; i++) {
         int2 p = sg.Get(i);
-        if (!InScreen(p))
+        if (!InScreen(p) || all(p == sg._Center))
             continue;
         if (!all(isfinite(_Positions[p].xyz)))
             continue;
@@ -280,7 +281,8 @@ void SpatialReuse() {
         return;
 
     PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
-    SpatialReuse(id, r);
+    if (r._M < _MCap)
+        SpatialReuse(id, r);
     r._M = min(r._M, _MCap);
     _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
 }

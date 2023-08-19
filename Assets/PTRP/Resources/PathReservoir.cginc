@@ -96,10 +96,10 @@ PathReservoir MakeReservoir() {
         0, 0, 0, 0,
         0, 0, 0, 0,
         0, 0, 0, 0,
-    #ifdef RECONNECTION
+        #ifdef RECONNECTION
         0, 0, 0, 0,
-        0, 0, 0, 0
-    #endif
+        0, 0, 0, 0,
+        #endif
     };
     return r;
 }
