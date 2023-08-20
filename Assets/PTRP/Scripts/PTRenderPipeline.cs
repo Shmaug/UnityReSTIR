@@ -12,16 +12,6 @@ struct AccumulationData {
     public Vector3 _CameraPos;
 };
 
-enum DebugCounterType {
-    RAYS,
-    SHADOW_RAYS,
-
-    SHIFT_ATTEMPTS,
-    SHIFT_SUCCESSES,
-
-    NUM_DEBUG_COUNTERS
-};
-
 public class PTRenderPipeline : RenderPipeline {
     PTRenderPipelineAsset _Asset;
 
@@ -148,7 +138,7 @@ public class PTRenderPipeline : RenderPipeline {
 
         if (_PathReservoirsBuffers[0] == null || _PathReservoirsBuffers[0].count < w*h)
             for (int i = 0; i < 2; i++)
-                _PathReservoirsBuffers[i] = new ComputeBuffer(w*h, 80);
+                _PathReservoirsBuffers[i] = new ComputeBuffer(w*h, 128);
 
         int currentReservoirBuffer = 0;
 
@@ -171,7 +161,7 @@ public class PTRenderPipeline : RenderPipeline {
             cmd.SetRayTracingBufferParam(_PathTracerShader, "_PathReservoirsOut", _PathReservoirsBuffers[currentReservoirBuffer]);
 
 
-            cmd.DispatchRays(_PathTracerShader, "TracePaths", (uint)w, (uint)h, 1);
+            cmd.DispatchRays(_PathTracerShader, "SampleCanonicalPaths", (uint)w, (uint)h, 1);
         }
 
         bool hasHistory = _AccumulationData.TryGetValue(camera, out AccumulationData accumData) &&
@@ -309,7 +299,7 @@ public class PTRenderPipeline : RenderPipeline {
         cmd.ReleaseTemporaryRT(renderTarget);
     }
 
-    float lastCounterPrint = 0;
+    float lastCounterUpdate = 0;
     protected override void Render(ScriptableRenderContext context, List<Camera> cameras) {
         #if UNITY_EDITOR
         if (!UnityEditor.EditorApplication.isPlaying && !UnityEditor.EditorApplication.isFocused) {
@@ -352,15 +342,10 @@ public class PTRenderPipeline : RenderPipeline {
                 pixels += camera.pixelWidth*camera.pixelHeight;
             }
         }
-        if (_Asset._DebugCounters && Time.time - lastCounterPrint > 1) {
-            int[] counters = new int[_DebugCounterBuffer.count];
-            _DebugCounterBuffer.GetData(counters);
-            _Asset._DebugCounterText = "";
-            _Asset._DebugCounterText += "Rays/pixel:   " + (counters[(int)DebugCounterType.RAYS          ]/pixels).ToString().PadRight(12);
-            _Asset._DebugCounterText += "(" + (int)(0.5f + 100f*counters[(int)DebugCounterType.SHADOW_RAYS    ]/counters[(int)DebugCounterType.RAYS          ]) + "% shadow)\n";
-            _Asset._DebugCounterText += "Shifts/pixel: " + (counters[(int)DebugCounterType.SHIFT_ATTEMPTS]/pixels).ToString().PadRight(12);
-            _Asset._DebugCounterText += "(" + (int)(0.5f + 100f*counters[(int)DebugCounterType.SHIFT_SUCCESSES]/counters[(int)DebugCounterType.SHIFT_ATTEMPTS]) + "% success)\n";
-            lastCounterPrint = Time.time;
+        if (_Asset._DebugCounters && Time.time - lastCounterUpdate > 0.25) {
+            _DebugCounterBuffer.GetData(_Asset._DebugCounterData);
+            _Asset._DebugCounterPixels = pixels;
+            lastCounterUpdate = Time.time;
         }
         #endif
     

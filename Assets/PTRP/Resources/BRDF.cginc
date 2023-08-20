@@ -6,9 +6,8 @@
 
 float3 EvalBrdf(ShadingData sd, float3 dirIn, float3 dirOut) {
     float3 n = sd.ShadingNormal();
-    float3 ng = sd.GeometryNormal();
     float cosOut = dot(dirOut, n);
-    if (sign(cosOut * dot(dirIn, n)) != sign(dot(dirIn,ng)*dot(dirOut,ng)))
+    if (sign(cosOut * dot(dirIn, n)) < 0)
         return 0;
         
     return (sd.BaseColor() / M_PI) * abs(cosOut);

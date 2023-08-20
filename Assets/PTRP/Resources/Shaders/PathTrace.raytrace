@@ -1,20 +1,20 @@
 #pragma max_recursion_depth 1
 
-#define SAMPLE_LIGHTS
-#define TALBOT_RMIS_TEMPORAL
-//#define TALBOT_RMIS_SPATIAL
-//#define RECONNECTION
-
 #include "../PathGeneration.cginc"
+
+#define TALBOT_RMIS_TEMPORAL
+#define TALBOT_RMIS_SPATIAL
+
+uint FlattenIndex(uint2 id) { return id.y*_OutputExtent.x + id.x; }
 
 RWStructuredBuffer<PathReservoir> _PathReservoirsIn;
 RWStructuredBuffer<PathReservoir> _PathReservoirsOut;
+PathReservoir LoadReservoir(uint2 id) { return _PathReservoirsIn[FlattenIndex(id)]; }
+void StoreReservoir(uint2 id, PathReservoir r) { _PathReservoirsOut[FlattenIndex(id)] = r; }
 
 uint _Seed;
-uint _SpatialReuseIteration;
-uint _SpatialReuseSamples;
-float _SpatialReuseRadius;
-float _MCap;
+
+// Canonical paths
 
 [shader("miss")]
 void Miss(inout ShadingData sd : SV_RayPayload) {
@@ -25,13 +25,14 @@ void Miss(inout ShadingData sd : SV_RayPayload) {
 }
 
 [shader("raygeneration")]
-void TracePaths() {
+void SampleCanonicalPaths() {
     uint2 id = DispatchRaysIndex().xy;
     if (any(id >= _OutputExtent)) return;
     
     RayDesc ray = GetCameraRay(id);
     ShadingData sd = TraceRay(ray);
 
+    _Radiance[id]  = float4(sd.Emission(), 1);
     _Albedo[id]    = float4(sd.BaseColor(), 1);
     _Positions[id] = float4(sd._Position, asfloat(sd._PackedGeometryNormal));
 
@@ -42,17 +43,24 @@ void TracePaths() {
         r = SampleRadiance(sd, ray.Direction, rng);
     }
 
-    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
-    _Radiance[id] = float4(sd.Emission(), 1);
+    StoreReservoir(id, r);
 }
+
 
 float _ReuseX;
 bool InScreen(int2 p) { return all(p >= 0) && all(p < _OutputExtent) && (_ReuseX == 0 || p.x/(float)_OutputExtent.x*sign(_ReuseX) > _ReuseX); }
 
+// Temporal reuse
+
 RWStructuredBuffer<PathReservoir> _PrevReservoirs;
+PathReservoir LoadPrevReservoir(uint2 id) { return _PrevReservoirs[FlattenIndex(id)]; }
+
 RWTexture2D<float4> _PrevPositions;
 float4x4 _PrevWorldToClip;
 float3 _PrevCameraPos;
+
+float _MCap;
+
 
 float Mis(float a, float b) { return a / (a + b); }
 
@@ -73,7 +81,7 @@ void TemporalReuse(uint2 id, inout PathReservoir r) {
     if (!all(isfinite(prevVertex.xyz)))
         return;
     
-    PathReservoir candidate = _PrevReservoirs[prevPixel.y*_OutputExtent.x + prevPixel.x];
+    PathReservoir candidate = LoadPrevReservoir(prevPixel);
     if (!(candidate._M > 0))
         return;
     if (!(candidate._W > 0)) {
@@ -95,7 +103,7 @@ void TemporalReuse(uint2 id, inout PathReservoir r) {
         float msum = mi;
     
         float jacobianToPrev;
-        PathSample shifted = ShiftTo(r._Sample, prevVertex, jacobianToPrev);
+        PathSample shifted = ShiftTo(r._Sample, prevVertex, _PrevCameraPos, jacobianToPrev);
         msum += candidate._M * Luminance(shifted._Radiance) * jacobianToPrev;
         
         r.PrepareMerge(msum > 0 ? mi/msum : 0);
@@ -109,9 +117,8 @@ void TemporalReuse(uint2 id, inout PathReservoir r) {
     }
     #else
     float jacobianToPrev;
-    PathSample s = ShiftTo(r._Sample, prevVertex, jacobianToPrev);
+    PathSample s = ShiftTo(r._Sample, prevVertex, _PrevCameraPos, jacobianToPrev);
     r.PrepareMerge(Mis(r._M, jacobianToPrev > 0 ? candidate._M : 0));
-    
     candidate.PrepareMerge(Mis(jacobianToCenter > 0 ? candidate._M : 0, r._M), jacobianToCenter);
     #endif
 
@@ -127,12 +134,17 @@ void TemporalReuse() {
     uint2 id = DispatchRaysIndex().xy;
     if (any(id >= _OutputExtent))
         return;
-    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
+    PathReservoir r = LoadReservoir(id);
     TemporalReuse(id, r);
-    r._M = min(r._M, _MCap);
-    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
+    if (_MCap > 0) r._M = min(r._M, _MCap);
+    StoreReservoir(id, r);
 }
 
+// Spatial reuse
+
+uint _SpatialReuseIteration;
+uint _SpatialReuseSamples;
+float _SpatialReuseRadius;
 
 struct SpatialSampleLocations {
     RandomSampler _RngSeed;
@@ -166,7 +178,7 @@ float ComputeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, f
         if (!all(isfinite(vp.xyz)))
             continue;
 
-        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        PathReservoir candidate = LoadReservoir(p);
         if (!(candidate._M > 0))
             continue;
 
@@ -200,7 +212,7 @@ float FinalizeSpatialMisWeight(SpatialSampleLocations sg, PathReservoir sample, 
         if (!all(isfinite(vp.xyz)))
             continue;
 
-        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        PathReservoir candidate = LoadReservoir(p);
         if (!(candidate._M > 0))
             continue;
 
@@ -244,7 +256,7 @@ void SpatialReuse(uint2 id, inout PathReservoir r) {
         if (!all(isfinite(_Positions[p].xyz)))
             continue;
 
-        PathReservoir candidate = _PathReservoirsIn[p.y*_OutputExtent.x + p.x];
+        PathReservoir candidate = LoadReservoir(p);
         if (candidate._M <= 0)
             continue;
 
@@ -280,9 +292,9 @@ void SpatialReuse() {
     if (any(id >= _OutputExtent))
         return;
 
-    PathReservoir r =_PathReservoirsIn[id.y*_OutputExtent.x + id.x];
-    if (r._M < _MCap)
+    PathReservoir r = LoadReservoir(id);
+    if (_MCap <= 0 || r._M < _MCap)
         SpatialReuse(id, r);
-    r._M = min(r._M, _MCap);
-    _PathReservoirsOut[id.y*_OutputExtent.x + id.x] = r;
+    if (_MCap > 0) r._M = min(r._M, _MCap);
+    StoreReservoir(id, r);
 }

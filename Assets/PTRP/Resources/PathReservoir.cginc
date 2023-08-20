@@ -1,6 +1,8 @@
 #ifndef PATH_RESERVOIR_H
 #define PATH_RESERVOIR_H
 
+#define RECONNECTION
+
 #include "Random.cginc"
 
 // 32 bytes
@@ -26,8 +28,8 @@ struct ReconnectionVertex {
 	uint PrefixBounces() { return BF_GET(_PackedRadiance[1], 16, 8); }
 	void PrefixBounces(uint newValue) { BF_SET(_PackedRadiance[1], newValue, 16, 8); }
     
-	bool IsEmissive() { return BF_GET(_PackedRadiance[1], 31, 1); }
-	void IsEmissive(bool newValue) { BF_SET(_PackedRadiance[1], newValue, 31, 1); }
+	bool IsLastVertex() { return BF_GET(_PackedRadiance[1], 31, 1); }
+	void IsLastVertex(bool newValue) { BF_SET(_PackedRadiance[1], newValue, 31, 1); }
     
 	float3 DirOut() { return UnpackNormal(_PackedDirOut); }
 	void DirOut(float3 newValue) { _PackedDirOut = PackNormal(newValue); }
@@ -37,7 +39,7 @@ ReconnectionVertex MakeReconnectionVertex() {
     return r;
 }
 
-// 64 bytes
+// 32 bytes (64 if RECONNECTION)
 struct PathSample {
     float3 _Radiance;
     float _PdfW;
@@ -59,13 +61,17 @@ PathSample MakeSample(float3 radiance, float pdfW, uint bounces, RandomSampler s
     #endif
     return r;
 }
-// 80 bytes
+// 64 bytes (128 if RECONNECTION)
 struct PathReservoir {
     PathSample _Sample;
     float _W;
     float _M;
     uint pad0;
     uint pad1;
+    uint4 pad2;
+    #ifdef RECONNECTION
+    uint4 pad3[2]; // pad to 128 bytes
+    #endif
 
     void PrepareMerge(float misWeight = 1, float jacobian = 1) {
         _W *= Luminance(_Sample._Radiance) * misWeight * jacobian;
@@ -96,7 +102,10 @@ PathReservoir MakeReservoir() {
         0, 0, 0, 0,
         0, 0, 0, 0,
         0, 0, 0, 0,
+        0, 0, 0, 0,
         #ifdef RECONNECTION
+        0, 0, 0, 0,
+        0, 0, 0, 0,
         0, 0, 0, 0,
         0, 0, 0, 0,
         #endif

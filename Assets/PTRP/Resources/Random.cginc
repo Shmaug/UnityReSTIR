@@ -68,6 +68,7 @@ RandomSampler MakeRandomSampler(uint seed, uint2 index, uint offset = 0) {
 	BF_SET(s._State[0], seed, 16, 16);
 	BF_SET(s._State[1], index.x,  0, 16);
 	BF_SET(s._State[1], index.y, 16, 16);
+	s._State = s.Next().xy;
     return s;
 }
 

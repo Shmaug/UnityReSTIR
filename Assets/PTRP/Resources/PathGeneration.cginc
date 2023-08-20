@@ -1,6 +1,8 @@
 #ifndef PATHGEN_H
 #define PATHGEN_H
 
+#define SAMPLE_LIGHTS
+
 #include "PathReservoir.cginc"
 #include "Camera.cginc"
 #include "Lights.cginc"
@@ -47,16 +49,23 @@ PathReservoir SampleRadiance(ShadingData sd, float3 dirIn, inout RandomSampler r
     float pdfW = 1;
 
     bool rcvFound = false;
-    float3 rcvPos = 0;
-    float rcvG = 0;
-    uint rcvPrefixBounces = 0;
+    ReconnectionVertex rcv = MakeReconnectionVertex();
     float3 throughputAtRcv = 0;
-    float pdfAtRcv = 0;
     
     for (uint bounces = 0; bounces < _MaxBounces && all(isfinite(sd._Position));) {
         #ifdef SAMPLE_LIGHTS
         const LightSampleRecord lr = SampleLight(sd, -dirIn, rng.Next());
         if (any(lr._Radiance > 0)) {
+            #ifdef RECONNECTION
+            if (rcvFound) {
+                if (rcv.IsLastVertex()) {
+                    throughputAtRcv = throughput * lr._Brdf;
+                    rcv.DirOut(lr._ToLight);
+                    rcv.IsLastVertex(false);
+                }
+                rcv.Radiance(lr._Radiance * throughput / throughputAtRcv);
+            }
+            #endif
             PathReservoir s = MakeReservoir(MakeSample(throughput * lr._Radiance, pdfW * lr._PdfW, bounces + 1, r._Sample._RngSeed, MakeReconnectionVertex()));
             s.PrepareMerge();
             r.Merge(rng.NextFloat().x, s);
@@ -73,20 +82,36 @@ PathReservoir SampleRadiance(ShadingData sd, float3 dirIn, inout RandomSampler r
             break;
         
         #ifdef RECONNECTION
+        if (rcvFound && rcv.IsLastVertex()) {
+            throughputAtRcv = throughput;
+            rcv.DirOut(dirIn);
+            rcv.IsLastVertex(false);
+        }
+        // store first available reconnection vertex
         if (!rcvFound && prevDiffuse && sd.IsDiffuse()) {
-            // store first available reconnection vertex
             rcvFound = true;
-            rcvPos = sd._Position;
-            float dx = prevPos - sd._Position;
-            rcvG = abs(dot(sd.ShadingNormal(), normalize(dx))) / dot(dx, dx);
-            rcvPrefixBounces = bounces;
-            pdfAtRcv = prevPdfW;
+            rcv.Radiance(0);
+            rcv.PrefixBounces(bounces);
+            rcv.IsLastVertex(true);
+            float3 dx = prevPos - sd._Position;
+            rcv._G = abs(dot(sd.ShadingNormal(), normalize(dx))) / dot(dx, dx);
+            rcv._PrefixPdfW = prevPdfW;
+            rcv._Position = sd._Position;
+            // throughputAtRcv is assigned in the next iteration
         }
         #endif
 
         float3 emission = sd.Emission();
         if (any(emission > 0)) {
-            PathReservoir s = MakeReservoir(MakeSample(throughput * emission, pdfW, bounces, r._Sample._RngSeed, MakeReconnectionVertex()));
+            #ifdef RECONNECTION
+            if (rcvFound) {
+                if (rcv.IsLastVertex())
+                    rcv.Radiance(emission);
+                else
+                    rcv.Radiance(emission * throughput / throughputAtRcv);
+            }
+            #endif
+            PathReservoir s = MakeReservoir(MakeSample(throughput * emission, pdfW, bounces, r._Sample._RngSeed, rcv));
             s.PrepareMerge();
             r.Merge(rng.NextFloat().x, s);
         } else
@@ -104,6 +129,7 @@ PathSample ShiftTo(PathSample from, float4 to, float3 cameraPos, out float jacob
 
     #ifdef RECONNECTION
     bool hasRcv = any(from._ReconnectionVertex.Radiance() > 0);
+    if (hasRcv) IncrementCounter(DEBUG_COUNTER_RECONNECTION_ATTEMPTS);
     #else
     bool hasRcv = false;
     #endif
@@ -122,10 +148,33 @@ PathSample ShiftTo(PathSample from, float4 to, float3 cameraPos, out float jacob
         #ifdef RECONNECTION
         // reconnect to base path
         if (hasRcv) {
-            if (bounces + 1 == from._ReconnectionVertex.PrefixBounces()) {
-                // TODO: connect to from._ReconnectionVertex, call MakeSample
+            if (bounces >= from._ReconnectionVertex.PrefixBounces())
                 break;
-            } else if (bounces + 1 > from._ReconnectionVertex.PrefixBounces()) {
+            if (bounces + 1 == from._ReconnectionVertex.PrefixBounces()) {
+                float3 toRcv = from._ReconnectionVertex._Position - sd._Position;
+                float dist = length(toRcv);
+                toRcv /= dist;
+
+                float3 brdf = EvalBrdf(sd, -dirIn, toRcv);
+                if (!any(brdf > 0))
+                    break;
+
+                ShadingData rcvSd = TraceRay(MakeRay(OffsetRayOrigin(sd._Position, sd.GeometryNormal(), toRcv), toRcv, 0, dist*1.05));
+
+                if (!all(isfinite(rcvSd._Position.xyz)) || abs(dist - length(rcvSd._Position - sd._Position))/dist > 0.01)
+                    break;
+                
+                float3 rcvBrdf = 1;
+                if (!from._ReconnectionVertex.IsLastVertex()) {
+                    rcvBrdf = EvalBrdf(rcvSd, -toRcv, from._ReconnectionVertex.DirOut());
+                    if (!any(rcvBrdf > 0))
+                        break;
+                }
+
+                r._ReconnectionVertex = from._ReconnectionVertex;
+                r._ReconnectionVertex._G = abs(dot(rcvSd.ShadingNormal(), toRcv)) / (dist*dist);
+                r._ReconnectionVertex._PrefixPdfW = pdfW;
+                r = MakeSample(throughput * brdf * rcvBrdf * from._ReconnectionVertex.Radiance(), pdfW * from._PdfW / from._ReconnectionVertex._PrefixPdfW, from._Bounces, from._RngSeed, r._ReconnectionVertex);
                 break;
             }
         }
@@ -159,8 +208,16 @@ PathSample ShiftTo(PathSample from, float4 to, float3 cameraPos, out float jacob
             rng.SkipNext();
     }
     
-    if (any(r._Radiance > 0) && r._PdfW > 0)
-        jacobian = from._PdfW / r._PdfW;
+    if (any(r._Radiance > 0) && r._PdfW > 0) {
+        #ifdef RECONNECTION
+        if (hasRcv) {
+            jacobian = (from._ReconnectionVertex._PrefixPdfW * from._ReconnectionVertex._G) / (r._ReconnectionVertex._PrefixPdfW * r._ReconnectionVertex._G);
+            if (jacobian > 0)
+                IncrementCounter(DEBUG_COUNTER_RECONNECTION_SUCCESSES);
+        } else
+        #endif
+            jacobian = from._PdfW / r._PdfW;
+    }
         
     if (jacobian > 0)
 	    IncrementCounter(DEBUG_COUNTER_SHIFT_SUCCESSES);

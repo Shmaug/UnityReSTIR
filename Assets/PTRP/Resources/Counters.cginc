@@ -9,6 +9,9 @@ enum DebugCounterType {
 
     DEBUG_COUNTER_SHIFT_ATTEMPTS,
     DEBUG_COUNTER_SHIFT_SUCCESSES,
+    
+    DEBUG_COUNTER_RECONNECTION_ATTEMPTS,
+    DEBUG_COUNTER_RECONNECTION_SUCCESSES,
 };
 
 void IncrementCounter(DebugCounterType counter) {

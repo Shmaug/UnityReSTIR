@@ -42,14 +42,15 @@ public class LightManager {
             }
             lights.Add(l);
         }
-        if (lights.Count == 0) return;
 
-        if (_LightBuffer == null || _LightBuffer.count < lights.Count) {
-            _LightBuffer = new ComputeBuffer(lights.Count, Marshal.SizeOf(typeof(GpuLight)));
+        _LightCount = lights.Count;
+
+        if (_LightBuffer == null || _LightBuffer.count < Mathf.Max(1, lights.Count)) {
+            _LightBuffer = new ComputeBuffer(Mathf.Max(1, lights.Count), Marshal.SizeOf(typeof(GpuLight)));
         }
 
-        cmd.SetBufferData(_LightBuffer, lights.ToArray());
-        _LightCount = lights.Count;
+        if (_LightCount > 0)
+            cmd.SetBufferData(_LightBuffer, lights.ToArray());
     }
     public void SetShaderParams(CommandBuffer cmd, RayTracingShader shader) {        
         cmd.SetRayTracingBufferParam(shader, "_Lights", _LightBuffer);

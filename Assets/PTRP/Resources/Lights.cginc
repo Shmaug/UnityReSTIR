@@ -58,39 +58,44 @@ uint _LightCount;
 struct LightSampleRecord {
     float3 _Radiance;
     float _PdfW;
+    float3 _ToLight;
+    float3 _Brdf;
 };
 LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
+    LightSampleRecord r = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (_LightCount == 0) {
+        return r;
+    }
     Light l = _Lights[rnd.z % _LightCount];
 
-    LightSampleRecord r;
     r._Radiance = l._Color;
     r._PdfW = 1 / (float)_LightCount;
     
     float3 lightFwd = normalize(float3(l._LightToWorld[0][2], l._LightToWorld[1][2], l._LightToWorld[2][2]));
 
-    float3 toLight = 0;
+    r._ToLight = 0;
     float dist = POS_INFINITY;
 
     switch (l._Type) {
     default:
     case LightType::Directional:
-        toLight = -lightFwd;
+        r._ToLight = -lightFwd;
         if (l._Angle > 0) {
-            toLight = mul(SampleUniformCone(UINT_TO_FLOAT_01(rnd.xy), l._Angle), MakeOrthonormal(toLight));
+            r._ToLight = mul(SampleUniformCone(UINT_TO_FLOAT_01(rnd.xy), l._Angle), MakeOrthonormal(r._ToLight));
             //r._PdfW *= UniformConePdfW(l._Angle);
         }
         break;
     case LightType::Point:
     case LightType::Spot: {
         float3 lightPos =  float3(l._LightToWorld[0][3], l._LightToWorld[1][3], l._LightToWorld[2][3]);
-        toLight = lightPos - sd._Position;
-        dist = length(toLight);
-        toLight /= dist;
+        r._ToLight = lightPos - sd._Position;
+        dist = length(r._ToLight);
+        r._ToLight /= dist;
 
         r._PdfW *= dist*dist;
 
         if (l._Type == LightType::Spot) {
-            float cosAngle = max(0, dot(-lightFwd, toLight));
+            float cosAngle = max(0, dot(-lightFwd, r._ToLight));
             if (cosAngle < l._Angle)
                 r._Radiance = 0;
         }
@@ -101,12 +106,13 @@ LightSampleRecord SampleLight(ShadingData sd, float3 dirIn, uint4 rnd) {
     if (!any(r._Radiance > 0))
         return r;
 
-    r._Radiance *= EvalBrdf(sd, dirIn, toLight);
+    r._Brdf = EvalBrdf(sd, dirIn, r._ToLight);
+    r._Radiance *= r._Brdf;
 
     if (!any(r._Radiance > 0))
         return r;
 
-    if (Occluded(MakeRay(OffsetRayOrigin(sd._Position, sd.GeometryNormal(), toLight), toLight, 0, dist)))
+    if (Occluded(MakeRay(OffsetRayOrigin(sd._Position, sd.GeometryNormal(), r._ToLight), r._ToLight, 0, dist)))
         r._Radiance = 0;
 
     return r;
